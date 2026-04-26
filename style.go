@@ -1,0 +1,570 @@
+package maprender
+
+import (
+	"encoding/json"
+	"fmt"
+	"image/color"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/peterstace/simplefeatures/geom"
+)
+
+type StyleLayer struct {
+	ID          string     `json:"id"`
+	Type        string     `json:"type"`
+	SourceLayer string     `json:"source-layer"`
+	Paint       PaintProps `json:"paint"`
+	Filter      []any      `json:"filter"`
+	MinZoom     *float64   `json:"minzoom"`
+	MaxZoom     *float64   `json:"maxzoom"`
+}
+
+type PaintProps struct {
+	BackgroundColor any `json:"background-color"`
+	FillColor       any `json:"fill-color"`
+	FillOpacity     any `json:"fill-opacity"`
+	LineColor       any `json:"line-color"`
+	LineWidth       any `json:"line-width"`
+	LineOpacity     any `json:"line-opacity"`
+	LineDashArray   any `json:"line-dasharray"`
+}
+
+type MapStyle struct {
+	Layers []StyleLayer `json:"layers"`
+}
+
+type TileJSON struct {
+	Tiles []string `json:"tiles"`
+}
+
+func FetchStyle(styleURL string) (*MapStyle, error) {
+	resp, err := http.Get(styleURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var raw struct {
+		Layers  []StyleLayer `json:"layers"`
+		Sources map[string]struct {
+			Type string `json:"type"`
+			URL  string `json:"url"`
+		} `json:"sources"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+
+	renderable := make([]StyleLayer, 0, len(raw.Layers))
+	for _, l := range raw.Layers {
+		switch l.Type {
+		case "background", "fill", "line":
+			renderable = append(renderable, l)
+		}
+	}
+
+	return &MapStyle{Layers: renderable}, nil
+}
+
+func FetchTileURLTemplate(sourceURL string) (string, error) {
+	resp, err := http.Get(sourceURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var tj TileJSON
+	if err := json.NewDecoder(resp.Body).Decode(&tj); err != nil {
+		return "", err
+	}
+	if len(tj.Tiles) == 0 {
+		return "", fmt.Errorf("TileJSON contains no tile URLs")
+	}
+
+	return tj.Tiles[0], nil
+}
+
+func evalExpr(expr any, zoom float64) any {
+	arr, ok := expr.([]any)
+	if !ok {
+		return expr
+	}
+	if len(arr) == 0 {
+		return expr
+	}
+
+	switch arr[0] {
+	case "interpolate":
+		return evalInterpolate(arr, zoom)
+	case "coalesce":
+		for _, v := range arr[1:] {
+			r := evalExpr(v, zoom)
+			if r != nil {
+				return r
+			}
+		}
+		return nil
+	case "get":
+		return nil
+	case "match":
+		return arr[len(arr)-1]
+	case "step":
+		return evalStep(arr, zoom)
+	default:
+		return nil
+	}
+}
+
+func evalInterpolate(arr []any, zoom float64) any {
+	if len(arr) < 5 {
+		return nil
+	}
+	_, ok := arr[2].([]any)
+	if !ok {
+		return nil
+	}
+	zoomExpr := arr[2]
+	if ze, ok := zoomExpr.([]any); !ok || len(ze) < 1 || ze[0] != "zoom" {
+		return nil
+	}
+
+	type kv struct {
+		z float64
+		v any
+	}
+	var pairs []kv
+	for i := 3; i < len(arr)-1; i += 2 {
+		zf, _ := toFloat(arr[i])
+		pairs = append(pairs, kv{zf, arr[i+1]})
+	}
+	if len(pairs) < 2 {
+		return pairs[0].v
+	}
+
+	if zoom <= pairs[0].z {
+		return pairs[0].v
+	}
+	if zoom >= pairs[len(pairs)-1].z {
+		return pairs[len(pairs)-1].v
+	}
+
+	for i := 0; i < len(pairs)-1; i++ {
+		if zoom >= pairs[i].z && zoom <= pairs[i+1].z {
+			z1, v1 := pairs[i].z, pairs[i].v
+			z2, v2 := pairs[i+1].z, pairs[i+1].v
+			v1f, ok1 := toFloat(v1)
+			v2f, ok2 := toFloat(v2)
+			if ok1 && ok2 && z2 != z1 {
+				t := (zoom - z1) / (z2 - z1)
+				return v1f + t*(v2f-v1f)
+			}
+			return v1
+		}
+	}
+	return pairs[len(pairs)-1].v
+}
+
+func evalStep(arr []any, zoom float64) any {
+	if len(arr) < 4 {
+		return nil
+	}
+	zoomExpr := arr[1]
+	if ze, ok := zoomExpr.([]any); !ok || len(ze) < 1 || ze[0] != "zoom" {
+		return nil
+	}
+	output := arr[2]
+	for i := 3; i < len(arr)-1; i += 2 {
+		zf, _ := toFloat(arr[i])
+		if zoom < zf {
+			return output
+		}
+		output = arr[i+1]
+	}
+	return output
+}
+
+func toFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func resolvePaintValue(val any, zoom float64) any {
+	return evalExpr(val, zoom)
+}
+
+func resolveLineWidth(val any, zoom float64) float64 {
+	if val == nil {
+		return 1.0
+	}
+	r := resolvePaintValue(val, zoom)
+	if f, ok := toFloat(r); ok {
+		return f
+	}
+	return 1.0
+}
+
+func GetLayerByID(style *MapStyle, id string) *StyleLayer {
+	for _, l := range style.Layers {
+		if l.ID == id {
+			return &l
+		}
+	}
+	return nil
+}
+
+func evaluateFilter(filter []any, props map[string]any, geometry geom.Geometry) bool {
+	if len(filter) == 0 {
+		return true
+	}
+	result := evalFilterExpr(filter, props, geometry)
+	if b, ok := result.(bool); ok {
+		return b
+	}
+	return true
+}
+
+func geometryTypeName(g geom.Geometry) string {
+	if g.IsPoint() {
+		return "Point"
+	}
+	if g.IsMultiPoint() {
+		return "MultiPoint"
+	}
+	if g.IsLineString() {
+		return "LineString"
+	}
+	if g.IsMultiLineString() {
+		return "MultiLineString"
+	}
+	if g.IsPolygon() {
+		return "Polygon"
+	}
+	if g.IsMultiPolygon() {
+		return "MultiPolygon"
+	}
+	if g.IsGeometryCollection() {
+		return "GeometryCollection"
+	}
+	return ""
+}
+
+func evalFilterExpr(expr any, props map[string]any, geometry geom.Geometry) any {
+	arr, ok := expr.([]any)
+	if !ok {
+		if s, ok := expr.(string); ok {
+			if v, has := props[s]; has {
+				return v
+			}
+		}
+		return expr
+	}
+	if len(arr) == 0 {
+		return expr
+	}
+
+	op, ok := arr[0].(string)
+	if !ok {
+		return true
+	}
+
+	switch op {
+	case "get":
+		if len(arr) == 2 {
+			if key, ok := arr[1].(string); ok {
+				if key == "geometry-type" {
+					return geometryTypeName(geometry)
+				}
+				if v, has := props[key]; has {
+					return v
+				}
+			}
+		}
+		return nil
+
+	case "geometry-type":
+		return geometryTypeName(geometry)
+
+	case "match":
+		return evalMatch(arr, props, geometry)
+
+	case "coalesce":
+		for _, v := range arr[1:] {
+			r := evalFilterExpr(v, props, geometry)
+			if r != nil {
+				return r
+			}
+		}
+		return nil
+
+	case "==":
+		if len(arr) == 3 {
+			lhs := evalFilterExpr(arr[1], props, geometry)
+			rhs := evalFilterExpr(arr[2], props, geometry)
+			return fmt.Sprintf("%v", lhs) == fmt.Sprintf("%v", rhs)
+		}
+		return true
+
+	case "!=":
+		if len(arr) == 3 {
+			lhs := evalFilterExpr(arr[1], props, geometry)
+			rhs := evalFilterExpr(arr[2], props, geometry)
+			return fmt.Sprintf("%v", lhs) != fmt.Sprintf("%v", rhs)
+		}
+		return true
+
+	case ">":
+		if len(arr) == 3 {
+			lf, ok1 := toFloat(evalFilterExpr(arr[1], props, geometry))
+			rf, ok2 := toFloat(evalFilterExpr(arr[2], props, geometry))
+			if ok1 && ok2 {
+				return lf > rf
+			}
+		}
+		return true
+
+	case ">=":
+		if len(arr) == 3 {
+			lf, ok1 := toFloat(evalFilterExpr(arr[1], props, geometry))
+			rf, ok2 := toFloat(evalFilterExpr(arr[2], props, geometry))
+			if ok1 && ok2 {
+				return lf >= rf
+			}
+		}
+		return true
+
+	case "<":
+		if len(arr) == 3 {
+			lf, ok1 := toFloat(evalFilterExpr(arr[1], props, geometry))
+			rf, ok2 := toFloat(evalFilterExpr(arr[2], props, geometry))
+			if ok1 && ok2 {
+				return lf < rf
+			}
+		}
+		return true
+
+	case "<=":
+		if len(arr) == 3 {
+			lf, ok1 := toFloat(evalFilterExpr(arr[1], props, geometry))
+			rf, ok2 := toFloat(evalFilterExpr(arr[2], props, geometry))
+			if ok1 && ok2 {
+				return lf <= rf
+			}
+		}
+		return true
+
+	case "in":
+		if len(arr) >= 3 {
+			lhs := fmt.Sprintf("%v", evalFilterExpr(arr[1], props, geometry))
+			for _, v := range arr[2:] {
+				if fmt.Sprintf("%v", evalFilterExpr(v, props, geometry)) == lhs {
+					return true
+				}
+			}
+			return false
+		}
+
+	case "!in":
+		if len(arr) >= 3 {
+			lhs := fmt.Sprintf("%v", evalFilterExpr(arr[1], props, geometry))
+			for _, v := range arr[2:] {
+				if fmt.Sprintf("%v", evalFilterExpr(v, props, geometry)) == lhs {
+					return false
+				}
+			}
+			return true
+		}
+
+	case "has":
+		if len(arr) == 2 {
+			key := resolveGetKey(arr[1])
+			_, ok := props[key]
+			return ok
+		}
+
+	case "!has":
+		if len(arr) == 2 {
+			key := resolveGetKey(arr[1])
+			_, ok := props[key]
+			return !ok
+		}
+
+	case "all":
+		for _, f := range arr[1:] {
+			r := evalFilterExpr(f, props, geometry)
+			if b, ok := r.(bool); ok && !b {
+				return false
+			}
+		}
+		return true
+
+	case "any":
+		for _, f := range arr[1:] {
+			r := evalFilterExpr(f, props, geometry)
+			if b, ok := r.(bool); ok && b {
+				return true
+			}
+		}
+		return false
+
+	case "!":
+		if len(arr) == 2 {
+			r := evalFilterExpr(arr[1], props, geometry)
+			if b, ok := r.(bool); ok {
+				return !b
+			}
+		}
+	}
+
+	return true
+}
+
+func evalMatch(arr []any, props map[string]any, geometry geom.Geometry) any {
+	if len(arr) < 4 {
+		return arr[len(arr)-1]
+	}
+	input := evalFilterExpr(arr[1], props, geometry)
+	inputStr := fmt.Sprintf("%v", input)
+
+	for i := 2; i < len(arr)-1; i += 2 {
+		labels := arr[i]
+		output := arr[i+1]
+
+		switch l := labels.(type) {
+		case []any:
+			for _, label := range l {
+				if fmt.Sprintf("%v", evalFilterExpr(label, props, geometry)) == inputStr {
+					return output
+				}
+			}
+		default:
+			if fmt.Sprintf("%v", evalFilterExpr(labels, props, geometry)) == inputStr {
+				return output
+			}
+		}
+	}
+	return arr[len(arr)-1]
+}
+
+func resolveGetKey(key any) string {
+	if s, ok := key.(string); ok {
+		return s
+	}
+	if arr, ok := key.([]any); ok && len(arr) == 2 {
+		if arr[0] == "get" {
+			if s, ok := arr[1].(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func parseColor(val any) color.Color {
+	cStr, ok := val.(string)
+	if !ok {
+		return color.RGBA{0, 0, 0, 0}
+	}
+
+	cStr = strings.TrimSpace(cStr)
+
+	// Hex (#RRGGBB or #RGB)
+	if after, ok0 := strings.CutPrefix(cStr, "#"); ok0 {
+		hex := after
+		if len(hex) == 3 {
+			hex = string([]byte{hex[0], hex[0], hex[1], hex[1], hex[2], hex[2]})
+		}
+		if len(hex) == 6 {
+			r, _ := strconv.ParseUint(hex[0:2], 16, 8)
+			g, _ := strconv.ParseUint(hex[2:4], 16, 8)
+			b, _ := strconv.ParseUint(hex[4:6], 16, 8)
+			return color.RGBA{uint8(r), uint8(g), uint8(b), 255}
+		}
+	}
+
+	// rgba(r, g, b, a) or rgb(r, g, b)
+	if strings.HasPrefix(cStr, "rgb") {
+		re := regexp.MustCompile(`rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\s*\)`)
+		matches := re.FindStringSubmatch(cStr)
+		if len(matches) >= 4 {
+			r, _ := strconv.ParseUint(matches[1], 10, 8)
+			g, _ := strconv.ParseUint(matches[2], 10, 8)
+			b, _ := strconv.ParseUint(matches[3], 10, 8)
+			a := uint8(255)
+			if len(matches) == 5 && matches[4] != "" {
+				af, _ := strconv.ParseFloat(matches[4], 64)
+				a = uint8(af * 255)
+			}
+			return color.RGBA{uint8(r), uint8(g), uint8(b), a}
+		}
+	}
+
+	// hsla(h, s%, l%, a) or hsl(h, s%, l%)
+	if strings.HasPrefix(cStr, "hsl") {
+		re := regexp.MustCompile(`hsla?\(\s*(\d+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%(?:\s*,\s*([\d.]+))?\s*\)`)
+		matches := re.FindStringSubmatch(cStr)
+		if len(matches) >= 4 {
+			h, _ := strconv.ParseFloat(matches[1], 64)
+			s, _ := strconv.ParseFloat(matches[2], 64)
+			l, _ := strconv.ParseFloat(matches[3], 64)
+			a := 1.0
+			if len(matches) == 5 && matches[4] != "" {
+				a, _ = strconv.ParseFloat(matches[4], 64)
+			}
+			return hslToRGBA(h, s, l, a)
+		}
+	}
+
+	return color.RGBA{0, 0, 0, 0}
+}
+
+func hslToRGBA(h, s, l, a float64) color.RGBA {
+	s /= 100
+	l /= 100
+	var r, g, b float64
+	if s == 0 {
+		r, g, b = l, l, l
+	} else {
+		var q float64
+		if l < 0.5 {
+			q = l * (1 + s)
+		} else {
+			q = l + s - l*s
+		}
+		p := 2*l - q
+		r = hueToRGB(p, q, h/360+1.0/3)
+		g = hueToRGB(p, q, h/360)
+		b = hueToRGB(p, q, h/360-1.0/3)
+	}
+	return color.RGBA{uint8(r * 255), uint8(g * 255), uint8(b * 255), uint8(a * 255)}
+}
+
+func hueToRGB(p, q, t float64) float64 {
+	if t < 0 {
+		t += 1
+	}
+	if t > 1 {
+		t -= 1
+	}
+	if t < 1.0/6 {
+		return p + (q-p)*6*t
+	}
+	if t < 1.0/2 {
+		return q
+	}
+	if t < 2.0/3 {
+		return p + (q-p)*(2.0/3-t)*6
+	}
+	return p
+}
