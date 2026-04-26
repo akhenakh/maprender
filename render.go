@@ -190,11 +190,11 @@ func drawFeature(dc *gg.Context, geometry geom.Geometry, offsetX, offsetY, scale
 	}
 	if geometry.IsPolygon() {
 		poly := geometry.MustAsPolygon()
-		drawPolygon(dc, poly, offsetX, offsetY, scale, dpr, style, zoom)
+		drawPolygon(dc, poly, offsetX, offsetY, scale, style, zoom)
 	} else if geometry.IsMultiPolygon() {
 		mp := geometry.MustAsMultiPolygon()
 		for i := 0; i < mp.NumPolygons(); i++ {
-			drawPolygon(dc, mp.PolygonN(i), offsetX, offsetY, scale, dpr, style, zoom)
+			drawPolygon(dc, mp.PolygonN(i), offsetX, offsetY, scale, style, zoom)
 		}
 	} else if geometry.IsLineString() {
 		ls := geometry.MustAsLineString()
@@ -206,16 +206,16 @@ func drawFeature(dc *gg.Context, geometry geom.Geometry, offsetX, offsetY, scale
 		}
 	} else if geometry.IsPoint() {
 		pt := geometry.MustAsPoint()
-		drawPoint(dc, pt, offsetX, offsetY, scale, dpr, style, zoom)
+		drawPoint(dc, pt, offsetX, offsetY, scale, style, zoom)
 	} else if geometry.IsMultiPoint() {
 		mp := geometry.MustAsMultiPoint()
 		for i := 0; i < mp.NumPoints(); i++ {
-			drawPoint(dc, mp.PointN(i), offsetX, offsetY, scale, dpr, style, zoom)
+			drawPoint(dc, mp.PointN(i), offsetX, offsetY, scale, style, zoom)
 		}
 	}
 }
 
-func drawPolygon(dc *gg.Context, poly geom.Polygon, offsetX, offsetY, scale, dpr float64, style *StyleLayer, zoom float64) {
+func drawPolygon(dc *gg.Context, poly geom.Polygon, offsetX, offsetY, scale float64, style *StyleLayer, zoom float64) {
 	c := resolvePaintValue(style.Paint.FillColor, zoom)
 	if c == nil {
 		return
@@ -263,7 +263,7 @@ func drawLineString(dc *gg.Context, ls geom.LineString, offsetX, offsetY, scale,
 	dc.Stroke()
 }
 
-func drawPoint(dc *gg.Context, pt geom.Point, offsetX, offsetY, scale, dpr float64, style *StyleLayer, zoom float64) {
+func drawPoint(dc *gg.Context, pt geom.Point, offsetX, offsetY, scale float64, style *StyleLayer, zoom float64) {
 	c := resolvePaintValue(style.Paint.FillColor, zoom)
 	if c == nil {
 		return
