@@ -80,6 +80,28 @@ req := maprender.RenderRequest{
 }
 ```
 
+### Overlays
+
+Draw arbitrary geometries (WGS84 lon/lat) on top of the map from GeoJSON, WKT, WKB, or a `geom.Geometry` directly. The stroke defaults to red and the fill to transparent; both can be set explicitly or derived from GeoJSON feature properties (keys `stroke`/`stroke-color`/`strokeColor` and `fill`/`fill-color`/`fillColor`):
+
+```go
+// GeoJSON (a Feature or FeatureCollection; properties drive colors)
+overlays, err := maprender.OverlayFromGeoJSON([]byte(`{
+    "type": "Feature",
+    "properties": {"fill": "#ff000080", "stroke": "#ff0000"},
+    "geometry": {"type": "Polygon", "coordinates": [[[2.34,48.85],[2.36,48.85],[2.36,48.87],[2.34,48.87],[2.34,48.85]]]}
+}`))
+
+// or WKT / WKB / a geometry
+overlay, err := maprender.OverlayFromWKT("LINESTRING(2.33 48.86, 2.37 48.86)")
+
+req := maprender.RenderRequest{
+    // ...
+    Overlays:   overlays,
+    FitOverlays: true, // compute center/zoom from the overlays' combined bounds
+}
+```
+
 ### Output formats
 
 `Render` returns a raster `*image.RGBA` (ready to encode as PNG). For other formats, use `RenderCanvas` to obtain a vector `*canvas.Canvas`, then render it with any of the canvas writers (`github.com/tdewolff/canvas/renderers/...`): `svg`, `pdf`, `ps`, `eps`, `png`, `jpeg`, `gif`, `tiff`, `bmp`, `webp`, ...

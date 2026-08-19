@@ -36,6 +36,8 @@ type RenderRequest struct {
 	SourceMaxZoom    int // optional; when TileURLTemplate is set, use this source max zoom for overzoom
 	Fonts            *FontManager
 	Sprite           *Sprite
+	Overlays         []Overlay
+	FitOverlays      bool // when true, center and zoom are computed to fit Overlays
 	MarkerLat        *float64
 	MarkerLng        *float64
 
@@ -110,6 +112,17 @@ func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error
 
 	logWidth := float64(req.Width) / dpr
 	logHeight := float64(req.Height) / dpr
+
+	// Fit the view to the overlays' bounds when requested.
+	if req.FitOverlays && len(req.Overlays) > 0 {
+		lat, lng, zoom, err := FitOverlaysBounds(req.Overlays, logWidth, logHeight)
+		if err != nil {
+			logger.Debug("failed to fit overlays", "error", err)
+		} else {
+			req.CenterLat, req.CenterLng, req.Zoom = lat, lng, zoom
+			logger.Debug("fit overlays", "lat", lat, "lng", lng, "zoom", zoom)
+		}
+	}
 
 	logger.Debug("starting map render",
 		"logWidth", logWidth, "logHeight", logHeight,
@@ -290,6 +303,19 @@ func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error
 		dc.SetStrokeWidth(2)
 		dc.DrawPath(mx, my, canvas.Circle(6))
 		dc.Stroke()
+	}
+
+	// Draw overlays on top of the map.
+	for _, o := range req.Overlays {
+		if o.Geometry.IsEmpty() {
+			continue
+		}
+		strokeWidth := o.StrokeWidth
+		if strokeWidth <= 0 {
+			strokeWidth = 2
+		}
+		projected := projectGeometry(o.Geometry, wm, minPxX, minPxY)
+		drawOverlayGeometry(dc, projected, o.strokeColor(), o.fillColor(), strokeWidth)
 	}
 
 	return c, nil
