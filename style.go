@@ -665,7 +665,7 @@ func evalFilterExpr(expr any, props map[string]any, geometry geom.Geometry) any 
 
 func evalMatch(arr []any, props map[string]any, geometry geom.Geometry) any {
 	if len(arr) < 4 {
-		return arr[len(arr)-1]
+		return evalDataExpr(arr[len(arr)-1], props, geometry)
 	}
 	input := evalFilterExpr(arr[1], props, geometry)
 
@@ -677,16 +677,16 @@ func evalMatch(arr []any, props map[string]any, geometry geom.Geometry) any {
 		case []any:
 			for _, label := range l {
 				if valuesEqual(evalFilterExpr(label, props, geometry), input) {
-					return output
+					return evalDataExpr(output, props, geometry)
 				}
 			}
 		default:
 			if valuesEqual(evalFilterExpr(labels, props, geometry), input) {
-				return output
+				return evalDataExpr(output, props, geometry)
 			}
 		}
 	}
-	return arr[len(arr)-1]
+	return evalDataExpr(arr[len(arr)-1], props, geometry)
 }
 
 // valuesEqual compares two expression values for equality without the

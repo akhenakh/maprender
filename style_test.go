@@ -129,6 +129,8 @@ func TestResolveIconImage(t *testing.T) {
 		{"step low zoom", []any{"step", []any{"zoom"}, "circle_11_black", 10, ""}, 5, "circle_11_black"},
 		{"step high zoom", []any{"step", []any{"zoom"}, "circle_11_black", 10, ""}, 15, ""},
 		{"match", []any{"match", []any{"get", "class"}, "bus", "bus_11", "dot_11"}, 14, "bus_11"},
+		{"match get output", []any{"match", []any{"get", "subclass"}, []any{"florist", "furniture"}, []any{"get", "subclass"}, []any{"get", "class"}}, 14, "bus"},
+		{"match get output default", []any{"match", []any{"get", "class"}, []any{"florist", "furniture"}, []any{"get", "class"}, "dot_11"}, 14, "dot_11"},
 	}
 
 	for _, tc := range cases {
