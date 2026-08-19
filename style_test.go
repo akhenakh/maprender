@@ -43,6 +43,9 @@ func TestToFloat(t *testing.T) {
 		{42.5, 42.5, true},
 		{42, 42.0, true},
 		{json.Number("42.5"), 42.5, true},
+		{uint64(42), 42.0, true},
+		{int64(-42), -42.0, true},
+		{float32(1.5), 1.5, true},
 		{"42.5", 0, false},
 	}
 
@@ -53,6 +56,59 @@ func TestToFloat(t *testing.T) {
 				t.Errorf("toFloat(%v) = %v, %v; want %v, %v", tc.input, got, ok, tc.want, tc.ok)
 			}
 		})
+	}
+}
+
+func TestResolveTextField(t *testing.T) {
+	geomPoint := geom.NewPoint(geom.Coordinates{XY: geom.XY{X: 0, Y: 0}}).AsGeometry()
+	props := map[string]any{
+		"name":         "Paris",
+		"name:latin":   "Paris",
+		"ref":          uint64(7),
+		"rank":         uint64(3),
+		"has_nonlatin": false,
+	}
+
+	cases := []struct {
+		name string
+		expr any
+		want string
+	}{
+		{"get", []any{"get", "name"}, "Paris"},
+		{"coalesce missing", []any{"coalesce", []any{"get", "name_en"}, []any{"get", "name"}}, "Paris"},
+		{"to-string number", []any{"to-string", []any{"get", "ref"}}, "7"},
+		{"concat", []any{"concat", []any{"get", "name"}, " (", []any{"get", "name:latin"}, ")"}, "Paris (Paris)"},
+		{
+			"case true branch",
+			[]any{"case", []any{"has", "name"}, []any{"concat", []any{"get", "name"}, "!"}, []any{"get", "name"}},
+			"Paris!",
+		},
+		{
+			"case false branch",
+			[]any{"case", []any{"has", "missing"}, "A", []any{"get", "name"}},
+			"Paris",
+		},
+		{"literal", []any{"literal", "fixed"}, "fixed"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveTextField(tc.expr, props, geomPoint); got != tc.want {
+				t.Errorf("resolveTextField() = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFilterNumericTypes(t *testing.T) {
+	geomPoint := geom.NewPoint(geom.Coordinates{XY: geom.XY{X: 0, Y: 0}}).AsGeometry()
+	props := map[string]any{"rank": uint64(5)}
+
+	if !evaluateFilter([]any{">=", []any{"get", "rank"}, 1}, props, geomPoint) {
+		t.Errorf("expected rank>=1 to be true for uint64 rank=5")
+	}
+	if evaluateFilter([]any{">=", []any{"get", "rank"}, 20}, props, geomPoint) {
+		t.Errorf("expected rank>=20 to be false for uint64 rank=5")
 	}
 }
 

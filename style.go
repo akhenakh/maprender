@@ -13,13 +13,14 @@ import (
 )
 
 type StyleLayer struct {
-	ID          string     `json:"id"`
-	Type        string     `json:"type"`
-	SourceLayer string     `json:"source-layer"`
-	Paint       PaintProps `json:"paint"`
-	Filter      []any      `json:"filter"`
-	MinZoom     *float64   `json:"minzoom"`
-	MaxZoom     *float64   `json:"maxzoom"`
+	ID          string      `json:"id"`
+	Type        string      `json:"type"`
+	SourceLayer string      `json:"source-layer"`
+	Paint       PaintProps  `json:"paint"`
+	Layout      LayoutProps `json:"layout"`
+	Filter      []any       `json:"filter"`
+	MinZoom     *float64    `json:"minzoom"`
+	MaxZoom     *float64    `json:"maxzoom"`
 }
 
 type PaintProps struct {
@@ -30,6 +31,18 @@ type PaintProps struct {
 	LineWidth       any `json:"line-width"`
 	LineOpacity     any `json:"line-opacity"`
 	LineDashArray   any `json:"line-dasharray"`
+	TextColor       any `json:"text-color"`
+	TextHaloColor   any `json:"text-halo-color"`
+	TextHaloWidth   any `json:"text-halo-width"`
+	TextOpacity     any `json:"text-opacity"`
+}
+
+type LayoutProps struct {
+	TextField     any      `json:"text-field"`
+	TextFont      []string `json:"text-font"`
+	TextSize      any      `json:"text-size"`
+	TextAnchor    any      `json:"text-anchor"`
+	TextTransform any      `json:"text-transform"`
 }
 
 type MapStyle struct {
@@ -65,7 +78,7 @@ func FetchStyle(styleURL string) (*MapStyle, error) {
 	renderable := make([]StyleLayer, 0, len(raw.Layers))
 	for _, l := range raw.Layers {
 		switch l.Type {
-		case "background", "fill", "line":
+		case "background", "fill", "line", "symbol":
 			renderable = append(renderable, l)
 		}
 	}
@@ -225,7 +238,27 @@ func toFloat(v any) (float64, bool) {
 	switch n := v.(type) {
 	case float64:
 		return n, true
+	case float32:
+		return float64(n), true
 	case int:
+		return float64(n), true
+	case int8:
+		return float64(n), true
+	case int16:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case uint:
+		return float64(n), true
+	case uint8:
+		return float64(n), true
+	case uint16:
+		return float64(n), true
+	case uint32:
+		return float64(n), true
+	case uint64:
 		return float64(n), true
 	case json.Number:
 		f, err := n.Float64()
@@ -248,6 +281,133 @@ func resolveLineWidth(val any, zoom float64) float64 {
 		return f
 	}
 	return 1.0
+}
+
+func resolveTextSize(val any, zoom float64) float64 {
+	if val == nil {
+		return 16.0
+	}
+	r := resolvePaintValue(val, zoom)
+	if f, ok := toFloat(r); ok {
+		return f
+	}
+	return 16.0
+}
+
+// evalDataExpr evaluates a Mapbox data-driven expression against feature
+// properties and geometry. It is a superset of the operators supported by
+// evalFilterExpr and additionally handles "case", "concat", "to-string",
+// "to-number" and "literal".
+func evalDataExpr(expr any, props map[string]any, geometry geom.Geometry) any {
+	arr, ok := expr.([]any)
+	if !ok {
+		return expr
+	}
+	if len(arr) == 0 {
+		return nil
+	}
+
+	op, ok := arr[0].(string)
+	if !ok {
+		return nil
+	}
+
+	switch op {
+	case "get":
+		if len(arr) == 2 {
+			if key, ok := arr[1].(string); ok {
+				if key == "geometry-type" {
+					return geometryTypeName(geometry)
+				}
+				if v, has := props[key]; has {
+					return v
+				}
+			}
+		}
+		return nil
+
+	case "has":
+		if len(arr) == 2 {
+			_, ok := props[resolveGetKey(arr[1])]
+			return ok
+		}
+		return false
+
+	case "coalesce":
+		for _, v := range arr[1:] {
+			if r := evalDataExpr(v, props, geometry); r != nil {
+				return r
+			}
+		}
+		return nil
+
+	case "concat":
+		var sb strings.Builder
+		for _, v := range arr[1:] {
+			sb.WriteString(toString(evalDataExpr(v, props, geometry)))
+		}
+		return sb.String()
+
+	case "to-string":
+		if len(arr) == 2 {
+			return toString(evalDataExpr(arr[1], props, geometry))
+		}
+		return ""
+
+	case "to-number":
+		if len(arr) == 2 {
+			if f, ok := toFloat(evalDataExpr(arr[1], props, geometry)); ok {
+				return f
+			}
+		}
+		return 0.0
+
+	case "case":
+		return evalCase(arr, props, geometry)
+
+	case "literal":
+		if len(arr) == 2 {
+			return arr[1]
+		}
+		return nil
+
+	default:
+		return evalFilterExpr(expr, props, geometry)
+	}
+}
+
+func evalCase(arr []any, props map[string]any, geometry geom.Geometry) any {
+	if len(arr) < 3 {
+		return nil
+	}
+	for i := 1; i+1 < len(arr); i += 2 {
+		if b, ok := evalDataExpr(arr[i], props, geometry).(bool); ok && b {
+			return evalDataExpr(arr[i+1], props, geometry)
+		}
+	}
+	return evalDataExpr(arr[len(arr)-1], props, geometry)
+}
+
+func toString(v any) string {
+	if v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		return t
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(t)
+	case bool:
+		return strconv.FormatBool(t)
+	default:
+		return fmt.Sprintf("%v", t)
+	}
+}
+
+func resolveTextField(expr any, props map[string]any, geometry geom.Geometry) string {
+	return toString(evalDataExpr(expr, props, geometry))
 }
 
 func GetLayerByID(style *MapStyle, id string) *StyleLayer {

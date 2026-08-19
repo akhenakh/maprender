@@ -10,11 +10,14 @@ Go library that renders Mapbox Vector Tiles into raster images using a Mapbox GL
 - Handles gzip-compressed and raw tile responses
 - Parses Mapbox GL Style JSON and applies paint properties per layer
 - Zoom-dependent expressions: `interpolate`, `step`, `coalesce`, `match`, `get`
+- Data expressions: `case`, `concat`, `to-string`, `to-number`, `literal`, ...
 - Filter expressions: `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `!in`, `has`, `!has`, `all`, `any`, `!`
-- Renders `background`, `fill`, and `line` layer types
+- Renders `background`, `fill`, `line`, and `symbol` (text) layer types
+- Text labels rendered from system fonts, with halo and collision detection
 - All geometry types: Point, MultiPoint, LineString, MultiLineString, Polygon, MultiPolygon
 - HiDPI/Retina rendering via configurable device pixel ratio
 - Context cancellation support
+- Multiple output formats via `RenderCanvas` (PNG, SVG, PDF, EPS, ...)
 
 ## Usage
 
@@ -52,10 +55,49 @@ When the requested `Zoom` is higher (or lower) than the source's available range
 SourceMaxZoom: 14,
 ```
 
+### Text labels and fonts
+
+`symbol` layers are rendered as text. The renderer loads the fonts referenced by the style's `text-font` stacks (e.g. `"Noto Sans Bold"`) from the operating system and falls back to the first available family. A default `FontManager` is used automatically; you can customise the families or provide your own:
+
+```go
+fonts := maprender.NewFontManager("Noto Sans", "DejaVu Sans")
+
+req := maprender.RenderRequest{
+    // ...
+    Fonts: fonts,
+}
+```
+
+### Output formats
+
+`Render` returns a raster `*image.RGBA` (PNG-ready). To export to other formats, use `RenderCanvas` to obtain the vector `*canvas.Canvas` and render it with any of the canvas writers:
+
+```go
+import (
+    "os"
+    "github.com/tdewolff/canvas/renderers/pdf"
+    "github.com/tdewolff/canvas/renderers/svg"
+)
+
+c, err := maprender.RenderCanvas(ctx, req)
+
+f, _ := os.Create("/tmp/map.svg")
+w := svg.New(f, c.W, c.H, nil)
+c.RenderTo(w)
+w.Close()
+f.Close()
+
+f, _ = os.Create("/tmp/map.pdf")
+p := pdf.New(f, c.W, c.H, nil)
+c.RenderTo(p)
+p.Close()
+f.Close()
+```
+
 ## Dependencies
 
 - [github.com/akhenakh/mvtgo](https://github.com/akhenakh/mvtgo) -- MVT Protobuf decoding
-- [github.com/fogleman/gg](https://github.com/fogleman/gg) -- 2D drawing on image canvas
+- [github.com/tdewolff/canvas](https://github.com/tdewolff/canvas) -- 2D vector drawing (raster, SVG, PDF, EPS, ...) and text rendering
 - [github.com/peterstace/simplefeatures](https://github.com/peterstace/simplefeatures) -- geometry types and Web Mercator projection
 
 ## License
