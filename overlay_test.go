@@ -152,8 +152,8 @@ func TestRenderOverlay(t *testing.T) {
 	}
 
 	red := 0
-	for y := 0; y < 100; y++ {
-		for x := 0; x < 100; x++ {
+	for y := range 100 {
+		for x := range 100 {
 			r, g, b, _ := img.At(x, y).RGBA()
 			if r>>8 > 200 && g>>8 < 80 && b>>8 < 80 {
 				red++

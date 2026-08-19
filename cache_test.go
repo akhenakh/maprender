@@ -70,14 +70,12 @@ func TestTileCacheAtomicWrite(t *testing.T) {
 	url := "https://example.com/concurrent.pbf"
 	const workers = 32
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			if err := c.Put(url, []byte("payload")); err != nil {
 				t.Errorf("Put: %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
