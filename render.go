@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/akhenakh/mvtgo"
 	"github.com/peterstace/simplefeatures/carto"
@@ -40,6 +41,9 @@ type RenderRequest struct {
 	FitOverlays      bool // when true, center and zoom are computed to fit Overlays
 	MarkerLat        *float64
 	MarkerLng        *float64
+
+	TileCacheDir string        // directory for downloaded tiles; empty defaults to ~/.cache/maprender
+	TileCacheTTL time.Duration // tile cache expiry; 0 defaults to 2 weeks, negative disables expiry
 
 	Logger *slog.Logger
 }
@@ -182,6 +186,17 @@ func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error
 
 	logger.Debug("tiles required", "minTileX", minTileX, "maxTileX", maxTileX, "minTileY", minTileY, "maxTileY", maxTileY)
 
+	cacheTTL := req.TileCacheTTL
+	if cacheTTL == 0 {
+		cacheTTL = defaultCacheTTL
+	}
+	fetchTileFn := fetchTile
+	if tc, err := NewTileCache(req.TileCacheDir, cacheTTL); err != nil {
+		logger.Debug("tile cache disabled", "error", err)
+	} else {
+		fetchTileFn = tc.Fetch
+	}
+
 	type decodedTile struct {
 		offsetX     float64
 		offsetY     float64
@@ -204,7 +219,7 @@ func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error
 			url = strings.ReplaceAll(url, "{y}", strconv.Itoa(ty))
 			logger.Debug("fetching tile", "url", url)
 
-			tileData, err := fetchTile(url)
+			tileData, err := fetchTileFn(url)
 			if err != nil {
 				logger.Debug("failed to fetch tile", "url", url, "error", err)
 				continue

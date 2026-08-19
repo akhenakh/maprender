@@ -80,6 +80,23 @@ req := maprender.RenderRequest{
 }
 ```
 
+### Tile cache
+
+Downloaded tiles are cached on disk under `~/.cache/maprender` by default and
+reused across renders and processes. The directory and expiry (default 2 weeks)
+are configurable; set `TileCacheTTL` to a negative value to disable expiry:
+
+```go
+req := maprender.RenderRequest{
+    // ...
+    TileCacheDir: "/tmp/maprender-cache",
+    TileCacheTTL: 7 * 24 * time.Hour,
+}
+```
+
+Tiles are written to a temporary file and atomically moved into place, so
+multiple processes can safely share the same cache directory.
+
 ### Overlays
 
 Draw arbitrary geometries (WGS84 lon/lat) on top of the map from GeoJSON, WKT, WKB, or a `geom.Geometry` directly. The stroke defaults to red and the fill to transparent; both can be set explicitly or derived from GeoJSON feature properties (keys `stroke`/`stroke-color`/`strokeColor` and `fill`/`fill-color`/`fillColor`):
