@@ -14,6 +14,7 @@ Go library that renders Mapbox Vector Tiles into raster images using a Mapbox GL
 - Filter expressions: `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `!in`, `has`, `!has`, `all`, `any`, `!`
 - Renders `background`, `fill`, `line`, and `symbol` (text) layer types
 - Text labels rendered from system fonts, with halo and collision detection
+- Sprite icons rendered alongside labels (POIs, shields, one-way arrows, ...)
 - All geometry types: Point, MultiPoint, LineString, MultiLineString, Polygon, MultiPolygon
 - HiDPI/Retina rendering via configurable device pixel ratio
 - Context cancellation support
@@ -55,7 +56,7 @@ When the requested `Zoom` is higher (or lower) than the source's available range
 SourceMaxZoom: 14,
 ```
 
-### Text labels and fonts
+### Text labels, fonts and icons
 
 `symbol` layers are rendered as text. The renderer loads the fonts referenced by the style's `text-font` stacks (e.g. `"Noto Sans Bold"`) from the operating system and falls back to the first available family. A default `FontManager` is used automatically; you can customise the families or provide your own:
 
@@ -65,6 +66,17 @@ fonts := maprender.NewFontManager("Noto Sans", "DejaVu Sans")
 req := maprender.RenderRequest{
     // ...
     Fonts: fonts,
+}
+```
+
+Sprite icons (the style's `sprite` field, e.g. POI markers and road shields) are fetched automatically from `<sprite>.json` and `<sprite>.png` and drawn next to their labels. You can override the sprite via `RenderRequest.Sprite`, loaded with `maprender.FetchSprite`:
+
+```go
+sprite, err := maprender.FetchSprite("https://tiles.openfreemap.org/sprites/ofm_f384/ofm")
+
+req := maprender.RenderRequest{
+    // ...
+    Sprite: sprite,
 }
 ```
 

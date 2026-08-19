@@ -140,3 +140,27 @@ func TestRender_Cancellation(t *testing.T) {
 		t.Errorf("expected context.Canceled error, got %v", err)
 	}
 }
+
+func TestIconTextOffset(t *testing.T) {
+	cases := []struct {
+		anchor       string
+		iconW, iconH float64
+		wantDX       float64
+		wantDY       float64
+	}{
+		{"top", 20, 30, 0, 17},
+		{"bottom", 20, 30, 0, -17},
+		{"left", 20, 30, 12, 0},
+		{"right", 20, 30, -12, 0},
+		{"center", 20, 30, 0, 17},
+		{"", 20, 30, 0, 17},
+	}
+
+	for _, tc := range cases {
+		dx, dy := iconTextOffset(tc.anchor, tc.iconW, tc.iconH)
+		if dx != tc.wantDX || dy != tc.wantDY {
+			t.Errorf("iconTextOffset(%q, %v, %v) = (%v, %v); want (%v, %v)",
+				tc.anchor, tc.iconW, tc.iconH, dx, dy, tc.wantDX, tc.wantDY)
+		}
+	}
+}

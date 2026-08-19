@@ -43,11 +43,16 @@ type LayoutProps struct {
 	TextSize      any      `json:"text-size"`
 	TextAnchor    any      `json:"text-anchor"`
 	TextTransform any      `json:"text-transform"`
+	IconImage     any      `json:"icon-image"`
+	IconSize      any      `json:"icon-size"`
+	IconAnchor    any      `json:"icon-anchor"`
 }
 
 type MapStyle struct {
 	Layers    []StyleLayer `json:"layers"`
 	SourceURL string
+	SpriteURL string
+	GlyphsURL string
 }
 
 type TileJSON struct {
@@ -66,6 +71,8 @@ func FetchStyle(styleURL string) (*MapStyle, error) {
 
 	var raw struct {
 		Layers  []StyleLayer `json:"layers"`
+		Sprite  string       `json:"sprite"`
+		Glyphs  string       `json:"glyphs"`
 		Sources map[string]struct {
 			Type string `json:"type"`
 			URL  string `json:"url"`
@@ -91,7 +98,7 @@ func FetchStyle(styleURL string) (*MapStyle, error) {
 		}
 	}
 
-	return &MapStyle{Layers: renderable, SourceURL: sourceURL}, nil
+	return &MapStyle{Layers: renderable, SourceURL: sourceURL, SpriteURL: raw.Sprite, GlyphsURL: raw.Glyphs}, nil
 }
 
 func FetchTileJSON(sourceURL string) (*TileJSON, error) {
@@ -292,6 +299,37 @@ func resolveTextSize(val any, zoom float64) float64 {
 		return f
 	}
 	return 16.0
+}
+
+func resolveIconSize(val any, zoom float64) float64 {
+	if val == nil {
+		return 1.0
+	}
+	r := resolvePaintValue(val, zoom)
+	if f, ok := toFloat(r); ok {
+		return f
+	}
+	return 1.0
+}
+
+// resolveIconImage evaluates an icon-image expression to an icon name. It
+// supports zoom-based "step"/"interpolate" expressions as well as the
+// property-based expressions handled by evalDataExpr.
+func resolveIconImage(expr any, props map[string]any, geometry geom.Geometry, zoom float64) string {
+	if expr == nil {
+		return ""
+	}
+	if arr, ok := expr.([]any); ok && len(arr) > 0 {
+		if op, ok := arr[0].(string); ok {
+			switch op {
+			case "step":
+				return toString(evalStep(arr, zoom))
+			case "interpolate":
+				return toString(evalInterpolate(arr, zoom))
+			}
+		}
+	}
+	return toString(evalDataExpr(expr, props, geometry))
 }
 
 // evalDataExpr evaluates a Mapbox data-driven expression against feature

@@ -1,2 +1,3 @@
- ./cmd/example/example
-./cmd/example/output.png
+cmd/example/example
+cmd/example/output.png
+cmd/example/output.svg

@@ -35,6 +35,7 @@ type RenderRequest struct {
 	SourceMinZoom    int // optional; when TileURLTemplate is set, use this source min zoom for underzoom
 	SourceMaxZoom    int // optional; when TileURLTemplate is set, use this source max zoom for overzoom
 	Fonts            *FontManager
+	Sprite           *Sprite
 	MarkerLat        *float64
 	MarkerLng        *float64
 
@@ -75,6 +76,15 @@ func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error
 	fonts := req.Fonts
 	if fonts == nil {
 		fonts = DefaultFonts()
+	}
+
+	sprite := req.Sprite
+	if sprite == nil && req.Style.SpriteURL != "" {
+		if s, err := fetchSpriteCached(req.Style.SpriteURL); err == nil {
+			sprite = s
+		} else {
+			logger.Debug("failed to fetch sprite", "error", err)
+		}
 	}
 
 	// Map geometry is simple polylines/polygons with many shared edges; the
@@ -260,7 +270,7 @@ func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error
 				if !evaluateFilter(layerStyle.Filter, feature.Properties, feature.Geometry) {
 					continue
 				}
-				drawSymbolFeature(dc, feature.Geometry, feature.Properties, tile.offsetX, tile.offsetY, scale, layerStyle, float64(req.Zoom), fonts, grid)
+				drawSymbolFeature(dc, feature.Geometry, feature.Properties, tile.offsetX, tile.offsetY, scale, layerStyle, float64(req.Zoom), fonts, sprite, grid)
 			}
 		}
 	}
@@ -381,17 +391,20 @@ func drawPoint(dc *canvas.Context, pt geom.Point, offsetX, offsetY, scale float6
 	dc.Fill()
 }
 
-func drawSymbolFeature(dc *canvas.Context, geometry geom.Geometry, props map[string]any, offsetX, offsetY, scale float64, style *StyleLayer, zoom float64, fonts *FontManager, grid *collisionGrid) {
+func drawSymbolFeature(dc *canvas.Context, geometry geom.Geometry, props map[string]any, offsetX, offsetY, scale float64, style *StyleLayer, zoom float64, fonts *FontManager, sprite *Sprite, grid *collisionGrid) {
 	if geometry.IsEmpty() {
 		return
 	}
 
+	iconName := resolveIconImage(style.Layout.IconImage, props, geometry, zoom)
 	text := resolveTextField(style.Layout.TextField, props, geometry)
-	if text == "" {
-		return
+	if text != "" {
+		if tr := resolveTextTransform(style.Layout.TextTransform, zoom); tr != "" {
+			text = applyTextTransform(text, tr)
+		}
 	}
-	if tr := resolveTextTransform(style.Layout.TextTransform, zoom); tr != "" {
-		text = applyTextTransform(text, tr)
+	if iconName == "" && text == "" {
+		return
 	}
 
 	anchor, angle, ok := symbolAnchor(geometry)
@@ -400,29 +413,6 @@ func drawSymbolFeature(dc *canvas.Context, geometry geom.Geometry, props map[str
 	}
 	x := offsetX + anchor.X*scale
 	y := offsetY + anchor.Y*scale
-
-	size := resolveTextSize(style.Layout.TextSize, zoom)
-
-	col := color.Color(color.RGBA{0, 0, 0, 255})
-	if c := resolvePaintValue(style.Paint.TextColor, zoom); c != nil {
-		col = parseColor(c)
-	}
-
-	var haloColor color.Color
-	haloWidth := 0.0
-	if c := resolvePaintValue(style.Paint.TextHaloColor, zoom); c != nil {
-		haloColor = parseColor(c)
-	}
-	if hw := resolvePaintValue(style.Paint.TextHaloWidth, zoom); hw != nil {
-		if f, ok := toFloat(hw); ok {
-			haloWidth = f
-		}
-	}
-
-	face := fonts.Face(style.Layout.TextFont, size, col, haloColor, haloWidth)
-	if face == nil {
-		return
-	}
 
 	// Keep labels readable: when the street direction points "down" (which
 	// would render the text upside-down), flip the label by 180 degrees.
@@ -436,34 +426,107 @@ func drawSymbolFeature(dc *canvas.Context, geometry geom.Geometry, props map[str
 		angle += 360
 	}
 
-	halign, dy := anchorLayout(style.Layout.TextAnchor, face)
-	baseline := y + dy
-	m := face.Metrics()
-	w := face.TextWidth(text)
-
-	var cx float64
-	switch halign {
-	case canvas.Left:
-		cx = x + w/2
-	case canvas.Right:
-		cx = x - w/2
-	default:
-		cx = x
+	// Resolve the icon (centered on the anchor) if the layer has one.
+	var iconImg image.Image
+	var iconW, iconH float64
+	if iconName != "" && sprite != nil {
+		if img, pr, ok := sprite.Icon(iconName); ok && img != nil {
+			iconSize := resolveIconSize(style.Layout.IconSize, zoom)
+			if pr <= 0 {
+				pr = 1
+			}
+			iconW = float64(img.Bounds().Dx()) / pr * iconSize
+			iconH = float64(img.Bounds().Dy()) / pr * iconSize
+			iconImg = img
+		}
 	}
-	cy := baseline + (m.Descent-m.Ascent)/2
-	hw := w / 2
-	hh := (m.Ascent + m.Descent) / 2
 
-	// Axis-aligned bounding box of the (possibly rotated) label.
+	// Resolve the text face.
+	var face *canvas.FontFace
+	var m canvas.FontMetrics
+	var textW float64
+	halign := canvas.Center
+	var dy float64
+	if text != "" {
+		size := resolveTextSize(style.Layout.TextSize, zoom)
+
+		col := color.Color(color.RGBA{0, 0, 0, 255})
+		if c := resolvePaintValue(style.Paint.TextColor, zoom); c != nil {
+			col = parseColor(c)
+		}
+
+		var haloColor color.Color
+		haloWidth := 0.0
+		if c := resolvePaintValue(style.Paint.TextHaloColor, zoom); c != nil {
+			haloColor = parseColor(c)
+		}
+		if hw := resolvePaintValue(style.Paint.TextHaloWidth, zoom); hw != nil {
+			if f, ok := toFloat(hw); ok {
+				haloWidth = f
+			}
+		}
+
+		face = fonts.Face(style.Layout.TextFont, size, col, haloColor, haloWidth)
+		if face != nil {
+			m = face.Metrics()
+			textW = face.TextWidth(text)
+			halign, dy = anchorLayout(style.Layout.TextAnchor, face)
+		}
+	}
+
+	// Offset the text away from the icon so they don't overlap.
+	textAnchor := "center"
+	if s, ok := style.Layout.TextAnchor.(string); ok && s != "" {
+		textAnchor = s
+	}
+	var tdx, tdy float64
+	if iconImg != nil {
+		tdx, tdy = iconTextOffset(textAnchor, iconW, iconH)
+	}
+
+	// Collision bounding box: union of the icon and text boxes (unrotated),
+	// then the axis-aligned box of that rectangle under rotation.
+	var box [4]float64 // minX, minY, maxX, maxY
+	box[0], box[1] = math.Inf(1), math.Inf(1)
+	box[2], box[3] = math.Inf(-1), math.Inf(-1)
+	if iconImg != nil {
+		box[0] = math.Min(box[0], x-iconW/2)
+		box[1] = math.Min(box[1], y-iconH/2)
+		box[2] = math.Max(box[2], x+iconW/2)
+		box[3] = math.Max(box[3], y+iconH/2)
+	}
+	if text != "" && face != nil {
+		tx := x + tdx
+		baseline := y + dy + tdy
+		var cx float64
+		switch halign {
+		case canvas.Left:
+			cx = tx + textW/2
+		case canvas.Right:
+			cx = tx - textW/2
+		default:
+			cx = tx
+		}
+		cy := baseline + (m.Descent-m.Ascent)/2
+		box[0] = math.Min(box[0], cx-textW/2)
+		box[1] = math.Min(box[1], cy-(m.Ascent+m.Descent)/2)
+		box[2] = math.Max(box[2], cx+textW/2)
+		box[3] = math.Max(box[3], cy+(m.Ascent+m.Descent)/2)
+	}
+
+	bcx := (box[0] + box[2]) / 2
+	bcy := (box[1] + box[3]) / 2
+	hw := (box[2] - box[0]) / 2
+	hh := (box[3] - box[1]) / 2
 	th := angle * math.Pi / 180
 	cw := math.Abs(math.Cos(th))*hw + math.Abs(math.Sin(th))*hh
 	ch := math.Abs(math.Sin(th))*hw + math.Abs(math.Cos(th))*hh
 
 	const pad = 2.0
-	x0 := cx - cw - pad
-	x1 := cx + cw + pad
-	y0 := cy - ch - pad
-	y1 := cy + ch + pad
+	x0 := bcx - cw - pad
+	x1 := bcx + cw + pad
+	y0 := bcy - ch - pad
+	y1 := bcy + ch + pad
 
 	if grid != nil && grid.overlaps(x0, y0, x1, y1) {
 		return
@@ -473,7 +536,13 @@ func drawSymbolFeature(dc *canvas.Context, geometry geom.Geometry, props map[str
 		dc.Push()
 		dc.RotateAbout(angle, x, y)
 	}
-	dc.DrawText(x, baseline, canvas.NewTextLine(face, text, halign))
+	if iconImg != nil {
+		resolution := canvas.DPMM(float64(iconImg.Bounds().Dx()) / iconW)
+		dc.DrawImage(x-iconW/2, y-iconH/2, iconImg, resolution)
+	}
+	if text != "" && face != nil {
+		dc.DrawText(x+tdx, y+dy+tdy, canvas.NewTextLine(face, text, halign))
+	}
 	if angle != 0 {
 		dc.Pop()
 	}
@@ -659,6 +728,28 @@ func anchorLayout(anchorVal any, face *canvas.FontFace) (canvas.TextAlign, float
 	}
 
 	return halign, dy
+}
+
+// iconTextOffset returns how much to shift the text anchor so it sits next to
+// (instead of on top of) the icon, based on the text-anchor direction.
+func iconTextOffset(anchor string, iconW, iconH float64) (dx, dy float64) {
+	const gap = 2.0
+	switch anchor {
+	case "top", "top-left", "top-right":
+		dy = iconH/2 + gap
+	case "bottom", "bottom-left", "bottom-right":
+		dy = -(iconH/2 + gap)
+	}
+	switch anchor {
+	case "left", "top-left", "bottom-left":
+		dx = iconW/2 + gap
+	case "right", "top-right", "bottom-right":
+		dx = -(iconW/2 + gap)
+	}
+	if anchor == "" || anchor == "center" {
+		dy = iconH/2 + gap
+	}
+	return
 }
 
 func resolveTextTransform(val any, zoom float64) string {

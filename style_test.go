@@ -112,6 +112,34 @@ func TestFilterNumericTypes(t *testing.T) {
 	}
 }
 
+func TestResolveIconImage(t *testing.T) {
+	geomPoint := geom.NewPoint(geom.Coordinates{XY: geom.XY{X: 0, Y: 0}}).AsGeometry()
+	props := map[string]any{"class": "bus", "ref_length": uint64(3)}
+
+	cases := []struct {
+		name string
+		expr any
+		zoom float64
+		want string
+	}{
+		{"literal", "airport_11", 14, "airport_11"},
+		{"get", []any{"get", "class"}, 14, "bus"},
+		{"to-string", []any{"to-string", []any{"get", "class"}}, 14, "bus"},
+		{"concat", []any{"concat", "road_", []any{"get", "ref_length"}}, 14, "road_3"},
+		{"step low zoom", []any{"step", []any{"zoom"}, "circle_11_black", 10, ""}, 5, "circle_11_black"},
+		{"step high zoom", []any{"step", []any{"zoom"}, "circle_11_black", 10, ""}, 15, ""},
+		{"match", []any{"match", []any{"get", "class"}, "bus", "bus_11", "dot_11"}, 14, "bus_11"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveIconImage(tc.expr, props, geomPoint, tc.zoom); got != tc.want {
+				t.Errorf("resolveIconImage() = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEvalInterpolate(t *testing.T) {
 	expr := []any{
 		"interpolate",
