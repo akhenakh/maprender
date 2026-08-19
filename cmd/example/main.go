@@ -20,6 +20,24 @@ func main() {
 		log.Fatalf("failed to fetch style: %v", err)
 	}
 
+	overlays, err := maprender.OverlayFromGeoJSON([]byte(`{
+		"type": "Feature",
+		"properties": {"fill": "#ff000080", "stroke": "#ff0000"},
+		"geometry": {
+			"type": "Polygon",
+			"coordinates": [[
+				[2.3482, 48.8638],
+				[2.3498, 48.8638],
+				[2.3498, 48.8654],
+				[2.3482, 48.8654],
+				[2.3482, 48.8638]
+			]]
+		}
+	}`))
+	if err != nil {
+		log.Fatalf("failed to parse overlay: %v", err)
+	}
+
 	req := maprender.RenderRequest{
 		CenterLat:        48.864716,
 		CenterLng:        2.349014,
@@ -28,6 +46,7 @@ func main() {
 		Height:           512,
 		DevicePixelRatio: 1.0,
 		Style:            style,
+		Overlays:         overlays,
 	}
 
 	if *svgOut {

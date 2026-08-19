@@ -733,17 +733,24 @@ func parseColor(val any) color.Color {
 
 	cStr = strings.TrimSpace(cStr)
 
-	// Hex (#RRGGBB or #RGB)
+	// Hex (#RGB, #RGBA, #RRGGBB, or #RRGGBBAA)
 	if after, ok0 := strings.CutPrefix(cStr, "#"); ok0 {
 		hex := after
-		if len(hex) == 3 {
+		switch len(hex) {
+		case 3:
 			hex = string([]byte{hex[0], hex[0], hex[1], hex[1], hex[2], hex[2]})
+		case 4:
+			hex = string([]byte{hex[0], hex[0], hex[1], hex[1], hex[2], hex[2], hex[3], hex[3]})
 		}
-		if len(hex) == 6 {
+		if len(hex) == 6 || len(hex) == 8 {
 			r, _ := strconv.ParseUint(hex[0:2], 16, 8)
 			g, _ := strconv.ParseUint(hex[2:4], 16, 8)
 			b, _ := strconv.ParseUint(hex[4:6], 16, 8)
-			return color.RGBA{uint8(r), uint8(g), uint8(b), 255}
+			a := uint64(255)
+			if len(hex) == 8 {
+				a, _ = strconv.ParseUint(hex[6:8], 16, 8)
+			}
+			return color.RGBA{uint8(r), uint8(g), uint8(b), uint8(a)}
 		}
 	}
 
