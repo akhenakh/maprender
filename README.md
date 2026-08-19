@@ -70,7 +70,7 @@ req := maprender.RenderRequest{
 
 ### Output formats
 
-`Render` returns a raster `*image.RGBA` (PNG-ready). To export to other formats, use `RenderCanvas` to obtain the vector `*canvas.Canvas` and render it with any of the canvas writers:
+`Render` returns a raster `*image.RGBA` (ready to encode as PNG). For other formats, use `RenderCanvas` to obtain a vector `*canvas.Canvas`, then render it with any of the canvas writers (`github.com/tdewolff/canvas/renderers/...`): `svg`, `pdf`, `ps`, `eps`, `png`, `jpeg`, `gif`, `tiff`, `bmp`, `webp`, ...
 
 ```go
 import (
@@ -81,17 +81,26 @@ import (
 
 c, err := maprender.RenderCanvas(ctx, req)
 
+// SVG
 f, _ := os.Create("/tmp/map.svg")
 w := svg.New(f, c.W, c.H, nil)
 c.RenderTo(w)
 w.Close()
 f.Close()
 
+// PDF
 f, _ = os.Create("/tmp/map.pdf")
 p := pdf.New(f, c.W, c.H, nil)
 c.RenderTo(p)
 p.Close()
 f.Close()
+```
+
+The `cmd/example` program demonstrates this: pass `-svg` to write `output.svg` instead of the default `output.png`:
+
+```sh
+go run ./cmd/example        # writes output.png
+go run ./cmd/example -svg   # writes output.svg
 ```
 
 ## Dependencies

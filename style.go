@@ -507,7 +507,7 @@ func evalFilterExpr(expr any, props map[string]any, geometry geom.Geometry) any 
 		if len(arr) == 3 {
 			lhs := evalFilterExpr(arr[1], props, geometry)
 			rhs := evalFilterExpr(arr[2], props, geometry)
-			return fmt.Sprintf("%v", lhs) == fmt.Sprintf("%v", rhs)
+			return valuesEqual(lhs, rhs)
 		}
 		return true
 
@@ -515,7 +515,7 @@ func evalFilterExpr(expr any, props map[string]any, geometry geom.Geometry) any 
 		if len(arr) == 3 {
 			lhs := evalFilterExpr(arr[1], props, geometry)
 			rhs := evalFilterExpr(arr[2], props, geometry)
-			return fmt.Sprintf("%v", lhs) != fmt.Sprintf("%v", rhs)
+			return !valuesEqual(lhs, rhs)
 		}
 		return true
 
@@ -561,9 +561,9 @@ func evalFilterExpr(expr any, props map[string]any, geometry geom.Geometry) any 
 
 	case "in":
 		if len(arr) >= 3 {
-			lhs := fmt.Sprintf("%v", evalFilterExpr(arr[1], props, geometry))
+			lhs := evalFilterExpr(arr[1], props, geometry)
 			for _, v := range arr[2:] {
-				if fmt.Sprintf("%v", evalFilterExpr(v, props, geometry)) == lhs {
+				if valuesEqual(evalFilterExpr(v, props, geometry), lhs) {
 					return true
 				}
 			}
@@ -572,9 +572,9 @@ func evalFilterExpr(expr any, props map[string]any, geometry geom.Geometry) any 
 
 	case "!in":
 		if len(arr) >= 3 {
-			lhs := fmt.Sprintf("%v", evalFilterExpr(arr[1], props, geometry))
+			lhs := evalFilterExpr(arr[1], props, geometry)
 			for _, v := range arr[2:] {
-				if fmt.Sprintf("%v", evalFilterExpr(v, props, geometry)) == lhs {
+				if valuesEqual(evalFilterExpr(v, props, geometry), lhs) {
 					return false
 				}
 			}
@@ -630,7 +630,6 @@ func evalMatch(arr []any, props map[string]any, geometry geom.Geometry) any {
 		return arr[len(arr)-1]
 	}
 	input := evalFilterExpr(arr[1], props, geometry)
-	inputStr := fmt.Sprintf("%v", input)
 
 	for i := 2; i < len(arr)-1; i += 2 {
 		labels := arr[i]
@@ -639,17 +638,39 @@ func evalMatch(arr []any, props map[string]any, geometry geom.Geometry) any {
 		switch l := labels.(type) {
 		case []any:
 			for _, label := range l {
-				if fmt.Sprintf("%v", evalFilterExpr(label, props, geometry)) == inputStr {
+				if valuesEqual(evalFilterExpr(label, props, geometry), input) {
 					return output
 				}
 			}
 		default:
-			if fmt.Sprintf("%v", evalFilterExpr(labels, props, geometry)) == inputStr {
+			if valuesEqual(evalFilterExpr(labels, props, geometry), input) {
 				return output
 			}
 		}
 	}
 	return arr[len(arr)-1]
+}
+
+// valuesEqual compares two expression values for equality without the
+// allocation cost of formatting both values as strings. It prefers numeric and
+// string comparison and only falls back to string formatting for mixed types.
+func valuesEqual(a, b any) bool {
+	if af, ok := toFloat(a); ok {
+		if bf, ok := toFloat(b); ok {
+			return af == bf
+		}
+	}
+	if as, ok := a.(string); ok {
+		if bs, ok := b.(string); ok {
+			return as == bs
+		}
+	}
+	if ab, ok := a.(bool); ok {
+		if bb, ok := b.(bool); ok {
+			return ab == bb
+		}
+	}
+	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
 }
 
 func resolveGetKey(key any) string {

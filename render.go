@@ -52,7 +52,7 @@ func Render(ctx context.Context, req RenderRequest) (*image.RGBA, error) {
 	if dpr <= 0 {
 		dpr = 1
 	}
-	return rasterizer.Draw(c, canvas.DPMM(dpr), canvas.SRGBColorSpace{}), nil
+	return rasterizer.Draw(c, canvas.DPMM(dpr), canvas.LinearColorSpace{}), nil
 }
 
 // RenderCanvas renders the map to a vector canvas that can be rasterized or
@@ -222,6 +222,9 @@ func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error
 
 			scale := tilePx / float64(mvtLayer.Extent)
 			for _, feature := range mvtLayer.Features {
+				if !featureOnScreen(feature.Geometry, tile.offsetX, tile.offsetY, scale, logWidth, logHeight, 64) {
+					continue
+				}
 				if !evaluateFilter(layerStyle.Filter, feature.Properties, feature.Geometry) {
 					continue
 				}
@@ -251,6 +254,9 @@ func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error
 
 			scale := tilePx / float64(mvtLayer.Extent)
 			for _, feature := range mvtLayer.Features {
+				if !featureOnScreen(feature.Geometry, tile.offsetX, tile.offsetY, scale, logWidth, logHeight, 64) {
+					continue
+				}
 				if !evaluateFilter(layerStyle.Filter, feature.Properties, feature.Geometry) {
 					continue
 				}
@@ -485,6 +491,22 @@ func layerVisible(l StyleLayer, zoom int) bool {
 		return false
 	}
 	return true
+}
+
+// featureOnScreen reports whether a feature's bounding box (transformed to
+// screen coordinates) intersects the viewport, expanded by pad pixels to
+// account for stroke widths and label extents.
+func featureOnScreen(g geom.Geometry, offsetX, offsetY, scale, viewW, viewH, pad float64) bool {
+	env := g.Envelope()
+	minXY, maxXY, ok := env.MinMaxXYs()
+	if !ok {
+		return true
+	}
+	x0 := offsetX + minXY.X*scale
+	x1 := offsetX + maxXY.X*scale
+	y0 := offsetY + minXY.Y*scale
+	y1 := offsetY + maxXY.Y*scale
+	return x1 >= -pad && x0 <= viewW+pad && y1 >= -pad && y0 <= viewH+pad
 }
 
 func findLayer(collections []mvtgo.Layer, name string) *mvtgo.Layer {

@@ -2,14 +2,19 @@ package main
 
 import (
 	"context"
+	"flag"
 	"image/png"
 	"log"
 	"os"
 
 	"github.com/akhenakh/maprender"
+	"github.com/tdewolff/canvas/renderers/svg"
 )
 
 func main() {
+	svgOut := flag.Bool("svg", false, "output SVG instead of PNG")
+	flag.Parse()
+
 	style, err := maprender.FetchStyle("https://tiles.openfreemap.org/styles/liberty")
 	if err != nil {
 		log.Fatalf("failed to fetch style: %v", err)
@@ -23,6 +28,28 @@ func main() {
 		Height:           512,
 		DevicePixelRatio: 1.0,
 		Style:            style,
+	}
+
+	if *svgOut {
+		c, err := maprender.RenderCanvas(context.Background(), req)
+		if err != nil {
+			log.Fatalf("failed to render: %v", err)
+		}
+
+		f, err := os.Create("output.svg")
+		if err != nil {
+			log.Fatalf("failed to create output file: %v", err)
+		}
+		defer f.Close()
+
+		w := svg.New(f, c.W, c.H, nil)
+		c.RenderTo(w)
+		if err := w.Close(); err != nil {
+			log.Fatalf("failed to write SVG: %v", err)
+		}
+
+		log.Println("saved output.svg")
+		return
 	}
 
 	img, err := maprender.Render(context.Background(), req)
