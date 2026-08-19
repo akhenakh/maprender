@@ -152,8 +152,8 @@ func TestIconTextOffset(t *testing.T) {
 		{"bottom", 20, 30, 0, -17},
 		{"left", 20, 30, 12, 0},
 		{"right", 20, 30, -12, 0},
-		{"center", 20, 30, 0, 17},
-		{"", 20, 30, 0, 17},
+		{"center", 20, 30, 0, 0},
+		{"", 20, 30, 0, 0},
 	}
 
 	for _, tc := range cases {

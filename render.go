@@ -756,8 +756,10 @@ func anchorLayout(anchorVal any, face *canvas.FontFace) (canvas.TextAlign, float
 	return halign, dy
 }
 
-// iconTextOffset returns how much to shift the text anchor so it sits next to
-// (instead of on top of) the icon, based on the text-anchor direction.
+// iconTextOffset returns how much to shift the text anchor relative to the
+// icon based on the text-anchor direction. For a centered (or unspecified)
+// anchor the text overlaps the icon (e.g. a highway shield with its route
+// number drawn inside), so no offset is applied.
 func iconTextOffset(anchor string, iconW, iconH float64) (dx, dy float64) {
 	const gap = 2.0
 	switch anchor {
@@ -771,9 +773,6 @@ func iconTextOffset(anchor string, iconW, iconH float64) (dx, dy float64) {
 		dx = iconW/2 + gap
 	case "right", "top-right", "bottom-right":
 		dx = -(iconW/2 + gap)
-	}
-	if anchor == "" || anchor == "center" {
-		dy = iconH/2 + gap
 	}
 	return
 }
