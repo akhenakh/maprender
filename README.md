@@ -5,6 +5,8 @@ Go library that renders Mapbox Vector Tiles into raster images using a Mapbox GL
 ## Features
 
 - Fetches MVT tiles from any tile server with `{z}/{x}/{y}` URL templates
+- Auto-resolves tile URL from style's vector source when `TileURLTemplate` is omitted
+- Overzoom/underzoom: requests the closest available source zoom and scales when the client zoom exceeds the source's `maxzoom`/`minzoom`
 - Handles gzip-compressed and raw tile responses
 - Parses Mapbox GL Style JSON and applies paint properties per layer
 - Zoom-dependent expressions: `interpolate`, `step`, `coalesce`, `match`, `get`
@@ -19,24 +21,35 @@ Go library that renders Mapbox Vector Tiles into raster images using a Mapbox GL
 ```go
 import "github.com/akhenakh/maprender"
 
-style, err := maprender.FetchStyle("https://example.com/style.json")
+style, err := maprender.FetchStyle("https://tiles.openfreemap.org/styles/liberty")
 if err != nil {
     log.Fatal(err)
 }
 
 img, err := maprender.Render(ctx, maprender.RenderRequest{
-    CenterLat:        40.7128,
-    CenterLng:        -74.0060,
+    CenterLat:        48.864716,
+    CenterLng:        2.349014,
     Zoom:             14,
     Width:            800,
     Height:           600,
     DevicePixelRatio: 1.0,
     Style:            style,
-    TileURLTemplate:  "https://tiles.example.com/{z}/{x}/{y}.pbf",
 })
 if err != nil {
     log.Fatal(err)
 }
+```
+
+`TileURLTemplate` is optional — when omitted, it is automatically resolved from the style's vector source TileJSON. You can also set it explicitly:
+
+```go
+TileURLTemplate: "https://tiles.openfreemap.org/planet/20260422_001001_pt/{z}/{x}/{y}.pbf",
+```
+
+When the requested `Zoom` is higher (or lower) than the source's available range, the renderer automatically fetches the closest available zoom and scales it (`overzoom`/`underzoom`). If you set `TileURLTemplate` manually, the source range is unknown; provide it via `SourceMinZoom`/`SourceMaxZoom` to enable the same behavior:
+
+```go
+SourceMaxZoom: 14,
 ```
 
 ## Dependencies

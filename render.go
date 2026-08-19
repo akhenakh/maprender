@@ -31,6 +31,8 @@ type RenderRequest struct {
 	DevicePixelRatio float64
 	Style            *MapStyle
 	TileURLTemplate  string
+	SourceMinZoom    int // optional; when TileURLTemplate is set, use this source min zoom for underzoom
+	SourceMaxZoom    int // optional; when TileURLTemplate is set, use this source max zoom for overzoom
 	MarkerLat        *float64
 	MarkerLng        *float64
 
@@ -45,6 +47,21 @@ func Render(ctx context.Context, req RenderRequest) (*image.RGBA, error) {
 
 	if req.Width == 0 || req.Height == 0 {
 		return nil, fmt.Errorf("width or height is 0")
+	}
+
+	sourceMinZoom := 0
+	sourceMaxZoom := 0
+	if req.TileURLTemplate == "" {
+		tj, err := req.Style.ResolveTileJSON()
+		if err != nil {
+			return nil, fmt.Errorf("TileURLTemplate is empty and could not be resolved from style: %w", err)
+		}
+		req.TileURLTemplate = tj.Tiles[0]
+		sourceMinZoom = tj.MinZoom
+		sourceMaxZoom = tj.MaxZoom
+	} else {
+		sourceMinZoom = req.SourceMinZoom
+		sourceMaxZoom = req.SourceMaxZoom
 	}
 
 	logWidth := float64(req.Width) / req.DevicePixelRatio
@@ -62,15 +79,30 @@ func Render(ctx context.Context, req RenderRequest) (*image.RGBA, error) {
 	globalPxY := centerXY.Y * float64(TileSize)
 	logger.Debug("computed center coordinates", "xyX", centerXY.X, "xyY", centerXY.Y, "globalPxX", globalPxX, "globalPxY", globalPxY)
 
+	// Overzoom/underzoom: the source only serves tiles within
+	// [sourceMinZoom, sourceMaxZoom]. When the client requests a zoom outside
+	// that range, fetch the closest available zoom and scale the geometry to the
+	// requested zoom instead of requesting (and failing on) non-existent tiles.
+	srcZoom := req.Zoom
+	if sourceMaxZoom > 0 && req.Zoom > sourceMaxZoom {
+		srcZoom = sourceMaxZoom
+	}
+	if sourceMinZoom > 0 && req.Zoom < sourceMinZoom {
+		srcZoom = sourceMinZoom
+	}
+	zoomScale := math.Exp2(float64(req.Zoom - srcZoom))
+	tilePx := float64(TileSize) * zoomScale
+	logger.Debug("source zoom resolution", "requestedZoom", req.Zoom, "srcZoom", srcZoom, "zoomScale", zoomScale)
+
 	minPxX := globalPxX - logWidth/2
 	minPxY := globalPxY - logHeight/2
 	maxPxX := globalPxX + logWidth/2
 	maxPxY := globalPxY + logHeight/2
 
-	minTileX := int(math.Floor(minPxX / float64(TileSize)))
-	minTileY := int(math.Floor(minPxY / float64(TileSize)))
-	maxTileX := int(math.Floor(maxPxX / float64(TileSize)))
-	maxTileY := int(math.Floor(maxPxY / float64(TileSize)))
+	minTileX := int(math.Floor(minPxX / tilePx))
+	minTileY := int(math.Floor(minPxY / tilePx))
+	maxTileX := int(math.Floor(maxPxX / tilePx))
+	maxTileY := int(math.Floor(maxPxY / tilePx))
 
 	logger.Debug("pixel bounds", "minPxX", minPxX, "maxPxX", maxPxX, "minPxY", minPxY, "maxPxY", maxPxY)
 
@@ -94,10 +126,10 @@ func Render(ctx context.Context, req RenderRequest) (*image.RGBA, error) {
 				return nil, ctx.Err()
 			}
 
-			maxTiles := 1 << req.Zoom
+			maxTiles := 1 << srcZoom
 			wrapTx := (tx%maxTiles + maxTiles) % maxTiles
 
-			url := strings.ReplaceAll(req.TileURLTemplate, "{z}", strconv.Itoa(req.Zoom))
+			url := strings.ReplaceAll(req.TileURLTemplate, "{z}", strconv.Itoa(srcZoom))
 			url = strings.ReplaceAll(url, "{x}", strconv.Itoa(wrapTx))
 			url = strings.ReplaceAll(url, "{y}", strconv.Itoa(ty))
 			logger.Debug("fetching tile", "url", url)
@@ -108,7 +140,7 @@ func Render(ctx context.Context, req RenderRequest) (*image.RGBA, error) {
 				continue
 			}
 
-			logger.Debug("fetched tile", "bytes", len(tileData), "zoom", req.Zoom, "x", wrapTx, "y", ty)
+			logger.Debug("fetched tile", "bytes", len(tileData), "zoom", srcZoom, "x", wrapTx, "y", ty)
 
 			collections, err := mvtgo.Decode(tileData)
 			if err != nil {
@@ -118,8 +150,8 @@ func Render(ctx context.Context, req RenderRequest) (*image.RGBA, error) {
 
 			logger.Debug("decoded tile layers", "count", len(collections))
 
-			offsetX := float64(tx*TileSize) - minPxX
-			offsetY := float64(ty*TileSize) - minPxY
+			offsetX := float64(tx)*tilePx - minPxX
+			offsetY := float64(ty)*tilePx - minPxY
 
 			for _, layerStyle := range req.Style.Layers {
 				if layerStyle.Type == "background" {
@@ -143,7 +175,7 @@ func Render(ctx context.Context, req RenderRequest) (*image.RGBA, error) {
 					continue
 				}
 
-				scale := float64(TileSize) / float64(mvtLayer.Extent)
+				scale := tilePx / float64(mvtLayer.Extent)
 				renderedCount := 0
 				filteredCount := 0
 

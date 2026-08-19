@@ -33,11 +33,15 @@ type PaintProps struct {
 }
 
 type MapStyle struct {
-	Layers []StyleLayer `json:"layers"`
+	Layers    []StyleLayer `json:"layers"`
+	SourceURL string
 }
 
 type TileJSON struct {
-	Tiles []string `json:"tiles"`
+	Tiles    []string `json:"tiles"`
+	MinZoom  int      `json:"minzoom"`
+	MaxZoom  int      `json:"maxzoom"`
+	TileSize int      `json:"tileSize"`
 }
 
 func FetchStyle(styleURL string) (*MapStyle, error) {
@@ -66,24 +70,55 @@ func FetchStyle(styleURL string) (*MapStyle, error) {
 		}
 	}
 
-	return &MapStyle{Layers: renderable}, nil
+	var sourceURL string
+	for _, src := range raw.Sources {
+		if src.Type == "vector" && src.URL != "" {
+			sourceURL = src.URL
+			break
+		}
+	}
+
+	return &MapStyle{Layers: renderable, SourceURL: sourceURL}, nil
 }
 
-func FetchTileURLTemplate(sourceURL string) (string, error) {
+func FetchTileJSON(sourceURL string) (*TileJSON, error) {
 	resp, err := http.Get(sourceURL)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	var tj TileJSON
 	if err := json.NewDecoder(resp.Body).Decode(&tj); err != nil {
-		return "", err
+		return nil, err
 	}
 	if len(tj.Tiles) == 0 {
-		return "", fmt.Errorf("TileJSON contains no tile URLs")
+		return nil, fmt.Errorf("TileJSON contains no tile URLs")
 	}
 
+	return &tj, nil
+}
+
+func FetchTileURLTemplate(sourceURL string) (string, error) {
+	tj, err := FetchTileJSON(sourceURL)
+	if err != nil {
+		return "", err
+	}
+	return tj.Tiles[0], nil
+}
+
+func (s *MapStyle) ResolveTileJSON() (*TileJSON, error) {
+	if s.SourceURL == "" {
+		return nil, fmt.Errorf("style has no vector source URL")
+	}
+	return FetchTileJSON(s.SourceURL)
+}
+
+func (s *MapStyle) ResolveTileURL() (string, error) {
+	tj, err := s.ResolveTileJSON()
+	if err != nil {
+		return "", err
+	}
 	return tj.Tiles[0], nil
 }
 
