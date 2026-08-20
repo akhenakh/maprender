@@ -2,6 +2,8 @@
 
 Go library that renders Mapbox Vector Tiles into raster images using a Mapbox GL Style JSON specification.
 
+![maprender](img/maprender.png)
+
 ## Features
 
 - Fetches MVT tiles from any tile server with `{z}/{x}/{y}` URL templates
