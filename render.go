@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/akhenakh/mvtgo"
@@ -46,6 +47,11 @@ type RenderRequest struct {
 	TileCacheTTL time.Duration // tile cache expiry; 0 defaults to 2 weeks, negative disables expiry
 
 	Logger *slog.Logger
+
+	// skipSymbols is set internally by incremental panning: patch renders
+	// composite geometry only, while text labels are drawn in a single
+	// full-viewport pass afterwards.
+	skipSymbols bool
 }
 
 // Render renders the map to a raster image (PNG-ready *image.RGBA).
@@ -62,9 +68,128 @@ func Render(ctx context.Context, req RenderRequest) (*image.RGBA, error) {
 	return rasterizer.Draw(c, canvas.DPMM(dpr), canvas.LinearColorSpace{}), nil
 }
 
-// RenderCanvas renders the map to a vector canvas that can be rasterized or
-// exported to other formats (SVG, PDF, EPS, ...) via canvas.Write / WriteFile.
-func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error) {
+// renderSymbolOverlay renders only the symbol (text) layers and the marker for
+// the full viewport onto a transparent image, used by incremental panning to
+// draw labels over an already composited frame. The viewport-wide collision
+// grid makes the result identical to a full render. It returns the image and
+// the bounding boxes (physical pixels) of everything that was drawn, so the
+// caller can composite only those regions instead of blending whole frame.
+func renderSymbolOverlay(ctx context.Context, req RenderRequest) (*image.RGBA, []image.Rectangle, error) {
+	vp, err := prepareView(ctx, req)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	tiles, err := fetchTiles(ctx, vp)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	img, rects := drawSymbolOverlayCanvas(vp, tiles)
+	return img, rects, nil
+}
+
+// viewParams holds the shared viewport state computed once per render and
+// reused by every drawing pass.
+type viewParams struct {
+	req             RenderRequest
+	logger          *slog.Logger
+	fonts           *FontManager
+	sprite          *Sprite
+	tileURLTemplate string
+	srcZoom         int
+	zoomScale       float64
+	tilePx          float64
+	logW, logH      float64
+	minPxX, minPxY  float64
+	minTileX        int
+	minTileY        int
+	maxTileX        int
+	maxTileY        int
+	wm              *carto.WebMercator
+	fetchTileFn     func(string) ([]byte, error)
+}
+
+// tileLayerEnvs caches the bounding box of every feature of one MVT layer (in
+// tile extent units) so visibility checks do not re-walk the geometries on
+// every render pass.
+type tileLayerEnvs struct {
+	rects [][4]float64
+	ok    []bool
+}
+
+type decodedTile struct {
+	offsetX     float64
+	offsetY     float64
+	collections []mvtgo.Layer
+	envs        []tileLayerEnvs // parallel to collections
+}
+
+// decodedEntry is a memoized tile decode shared across renders and pans.
+type decodedEntry struct {
+	collections []mvtgo.Layer
+	envs        []tileLayerEnvs
+}
+
+const decodedCacheMax = 32
+
+var (
+	decodedMu    sync.Mutex
+	decodedCache map[string]*decodedEntry
+	decodedClock uint64
+)
+
+// lookupDecoded returns the memoized decode of the tile at url, if any.
+func lookupDecoded(url string) *decodedEntry {
+	decodedMu.Lock()
+	defer decodedMu.Unlock()
+	e := decodedCache[url]
+	if e != nil {
+		decodedClock++
+	}
+	return e
+}
+
+// storeDecoded memoizes a tile decode, evicting everything when the cache
+// grows beyond decodedCacheMax entries.
+func storeDecoded(url string, e *decodedEntry) {
+	decodedMu.Lock()
+	defer decodedMu.Unlock()
+	if decodedCache == nil || len(decodedCache) >= decodedCacheMax {
+		decodedCache = make(map[string]*decodedEntry)
+	}
+	decodedClock++
+	decodedCache[url] = e
+}
+
+// buildLayerEnvs precomputes per-feature bounding boxes for all layers.
+func buildLayerEnvs(collections []mvtgo.Layer) []tileLayerEnvs {
+	envs := make([]tileLayerEnvs, len(collections))
+	for li := range collections {
+		feats := collections[li].Features
+		e := tileLayerEnvs{
+			rects: make([][4]float64, len(feats)),
+			ok:    make([]bool, len(feats)),
+		}
+		for fi := range feats {
+			if feats[fi].Geometry.IsEmpty() {
+				continue
+			}
+			minXY, maxXY, ok := feats[fi].Geometry.Envelope().MinMaxXYs()
+			if !ok {
+				continue
+			}
+			e.rects[fi] = [4]float64{minXY.X, minXY.Y, maxXY.X, maxXY.Y}
+			e.ok[fi] = true
+		}
+		envs[li] = e
+	}
+	return envs
+}
+
+// prepareView resolves the style/tile source, fonts, sprites, zoom clamping
+// and viewport geometry shared by all render paths.
+func prepareView(ctx context.Context, req RenderRequest) (*viewParams, error) {
 	logger := req.Logger
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -101,15 +226,17 @@ func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error
 
 	sourceMinZoom := 0
 	sourceMaxZoom := 0
+	tileURLTemplate := ""
 	if req.TileURLTemplate == "" {
 		tj, err := req.Style.ResolveTileJSON()
 		if err != nil {
 			return nil, fmt.Errorf("TileURLTemplate is empty and could not be resolved from style: %w", err)
 		}
-		req.TileURLTemplate = tj.Tiles[0]
+		tileURLTemplate = tj.Tiles[0]
 		sourceMinZoom = tj.MinZoom
 		sourceMaxZoom = tj.MaxZoom
 	} else {
+		tileURLTemplate = req.TileURLTemplate
 		sourceMinZoom = req.SourceMinZoom
 		sourceMaxZoom = req.SourceMaxZoom
 	}
@@ -166,24 +293,6 @@ func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error
 	maxTileY := int(math.Floor(maxPxY / tilePx))
 
 	logger.Debug("pixel bounds", "minPxX", minPxX, "maxPxX", maxPxX, "minPxY", minPxY, "maxPxY", maxPxY)
-
-	c := canvas.New(logWidth, logHeight)
-	dc := canvas.NewContext(c)
-	dc.SetCoordSystem(canvas.CartesianIV)
-
-	// Draw Background
-	if bgLayer := GetLayerByID(req.Style, "background"); bgLayer != nil {
-		dc.SetFillColor(parseColor(resolvePaintValue(bgLayer.Paint.BackgroundColor, float64(req.Zoom))))
-	} else {
-		dc.SetFillColor(color.RGBA{248, 244, 240, 255})
-	}
-	dc.MoveTo(0, 0)
-	dc.LineTo(logWidth, 0)
-	dc.LineTo(logWidth, logHeight)
-	dc.LineTo(0, logHeight)
-	dc.Close()
-	dc.Fill()
-
 	logger.Debug("tiles required", "minTileX", minTileX, "maxTileX", maxTileX, "minTileY", minTileY, "maxTileY", maxTileY)
 
 	cacheTTL := req.TileCacheTTL
@@ -197,53 +306,94 @@ func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error
 		fetchTileFn = tc.Fetch
 	}
 
-	type decodedTile struct {
-		offsetX     float64
-		offsetY     float64
-		collections []mvtgo.Layer
-	}
+	return &viewParams{
+		req:             req,
+		logger:          logger,
+		fonts:           fonts,
+		sprite:          sprite,
+		tileURLTemplate: tileURLTemplate,
+		srcZoom:         srcZoom,
+		zoomScale:       zoomScale,
+		tilePx:          tilePx,
+		logW:            logWidth,
+		logH:            logHeight,
+		minPxX:          minPxX,
+		minPxY:          minPxY,
+		minTileX:        minTileX,
+		minTileY:        minTileY,
+		maxTileX:        maxTileX,
+		maxTileY:        maxTileY,
+		wm:              wm,
+		fetchTileFn:     fetchTileFn,
+	}, nil
+}
 
+// fetchTiles downloads and decodes all tiles visible in the viewport.
+func fetchTiles(ctx context.Context, vp *viewParams) ([]decodedTile, error) {
 	var tiles []decodedTile
-	for ty := minTileY; ty <= maxTileY; ty++ {
-		for tx := minTileX; tx <= maxTileX; tx++ {
+	for ty := vp.minTileY; ty <= vp.maxTileY; ty++ {
+		for tx := vp.minTileX; tx <= vp.maxTileX; tx++ {
 			if ctx.Err() != nil {
-				logger.Debug("render cancelled by context")
+				vp.logger.Debug("render cancelled by context")
 				return nil, ctx.Err()
 			}
 
-			maxTiles := 1 << srcZoom
+			maxTiles := 1 << vp.srcZoom
 			wrapTx := (tx%maxTiles + maxTiles) % maxTiles
 
-			url := strings.ReplaceAll(req.TileURLTemplate, "{z}", strconv.Itoa(srcZoom))
+			url := strings.ReplaceAll(vp.tileURLTemplate, "{z}", strconv.Itoa(vp.srcZoom))
 			url = strings.ReplaceAll(url, "{x}", strconv.Itoa(wrapTx))
 			url = strings.ReplaceAll(url, "{y}", strconv.Itoa(ty))
-			logger.Debug("fetching tile", "url", url)
+			vp.logger.Debug("fetching tile", "url", url)
 
-			tileData, err := fetchTileFn(url)
+			tileData, err := vp.fetchTileFn(url)
 			if err != nil {
-				logger.Debug("failed to fetch tile", "url", url, "error", err)
+				vp.logger.Debug("failed to fetch tile", "url", url, "error", err)
 				continue
 			}
 
-			logger.Debug("fetched tile", "bytes", len(tileData), "zoom", srcZoom, "x", wrapTx, "y", ty)
+			vp.logger.Debug("fetched tile", "bytes", len(tileData), "zoom", vp.srcZoom, "x", wrapTx, "y", ty)
 
-			collections, err := mvtgo.Decode(tileData)
-			if err != nil {
-				logger.Debug("failed to decode MVT tile data", "error", err)
-				continue
+			entry := lookupDecoded(url)
+			if entry == nil {
+				collections, err := mvtgo.Decode(tileData)
+				if err != nil {
+					vp.logger.Debug("failed to decode MVT tile data", "error", err)
+					continue
+				}
+				entry = &decodedEntry{collections: collections, envs: buildLayerEnvs(collections)}
+				storeDecoded(url, entry)
 			}
-
-			logger.Debug("decoded tile layers", "count", len(collections))
 
 			tiles = append(tiles, decodedTile{
-				offsetX:     float64(tx)*tilePx - minPxX,
-				offsetY:     float64(ty)*tilePx - minPxY,
-				collections: collections,
+				offsetX:     float64(tx)*vp.tilePx - vp.minPxX,
+				offsetY:     float64(ty)*vp.tilePx - vp.minPxY,
+				collections: entry.collections,
+				envs:        entry.envs,
 			})
 		}
 	}
+	return tiles, nil
+}
 
-	// Pass 1: fill and line layers (background is already painted).
+func drawBackground(dc *canvas.Context, vp *viewParams) {
+	if bgLayer := GetLayerByID(vp.req.Style, "background"); bgLayer != nil {
+		dc.SetFillColor(parseColor(resolvePaintValue(bgLayer.Paint.BackgroundColor, float64(vp.req.Zoom))))
+	} else {
+		dc.SetFillColor(color.RGBA{248, 244, 240, 255})
+	}
+	dc.MoveTo(0, 0)
+	dc.LineTo(vp.logW, 0)
+	dc.LineTo(vp.logW, vp.logH)
+	dc.LineTo(0, vp.logH)
+	dc.Close()
+	dc.Fill()
+}
+
+// drawGeometryLayers renders pass 1: fill and line layers (the background must
+// already be painted).
+func drawGeometryLayers(dc *canvas.Context, vp *viewParams, tiles []decodedTile) {
+	req := &vp.req
 	for _, tile := range tiles {
 		for _, layerStyle := range req.Style.Layers {
 			if layerStyle.Type == "background" || layerStyle.Type == "symbol" {
@@ -253,14 +403,17 @@ func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error
 				continue
 			}
 
-			mvtLayer := findLayer(tile.collections, layerStyle.SourceLayer)
-			if mvtLayer == nil {
+			li := findLayerIdx(tile.collections, layerStyle.SourceLayer)
+			if li < 0 {
 				continue
 			}
+			mvtLayer := &tile.collections[li]
 
-			scale := tilePx / float64(mvtLayer.Extent)
-			for _, feature := range mvtLayer.Features {
-				if !featureOnScreen(feature.Geometry, tile.offsetX, tile.offsetY, scale, logWidth, logHeight, 64) {
+			scale := vp.tilePx / float64(mvtLayer.Extent)
+			envs := tile.envs[li]
+			for fi := range mvtLayer.Features {
+				feature := &mvtLayer.Features[fi]
+				if !envOnScreen(envs, fi, tile.offsetX, tile.offsetY, scale, vp.logW, vp.logH, 64) {
 					continue
 				}
 				if !evaluateFilter(layerStyle.Filter, feature.Properties, feature.Geometry) {
@@ -270,10 +423,16 @@ func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error
 			}
 		}
 	}
+}
 
-	// Pass 2: symbol (text) layers, drawn in reverse style order so that
-	// higher-priority labels (place/city/country, declared last in the style)
-	// reserve space first. Collision detection prevents overlapping labels.
+// drawSymbolLayers renders pass 2: symbol (text) layers, drawn in reverse style
+// order so that higher-priority labels (place/city/country, declared last in
+// the style) reserve space first. Collision detection prevents overlapping
+// labels. When boxes is non-nil it receives the bounding box of every label
+// that was drawn (logical coordinates), e.g. to limit compositing to those
+// regions.
+func drawSymbolLayers(dc *canvas.Context, vp *viewParams, tiles []decodedTile, boxes *[][4]float64) {
+	req := &vp.req
 	grid := newCollisionGrid(32)
 	for _, tile := range tiles {
 		for i := len(req.Style.Layers) - 1; i >= 0; i-- {
@@ -285,43 +444,56 @@ func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error
 				continue
 			}
 
-			mvtLayer := findLayer(tile.collections, layerStyle.SourceLayer)
-			if mvtLayer == nil {
+			li := findLayerIdx(tile.collections, layerStyle.SourceLayer)
+			if li < 0 {
 				continue
 			}
+			mvtLayer := &tile.collections[li]
 
-			scale := tilePx / float64(mvtLayer.Extent)
-			for _, feature := range mvtLayer.Features {
-				if !featureOnScreen(feature.Geometry, tile.offsetX, tile.offsetY, scale, logWidth, logHeight, 64) {
+			scale := vp.tilePx / float64(mvtLayer.Extent)
+			envs := tile.envs[li]
+			for fi := range mvtLayer.Features {
+				feature := &mvtLayer.Features[fi]
+				if !envOnScreen(envs, fi, tile.offsetX, tile.offsetY, scale, vp.logW, vp.logH, 64) {
 					continue
 				}
 				if !evaluateFilter(layerStyle.Filter, feature.Properties, feature.Geometry) {
 					continue
 				}
-				drawSymbolFeature(dc, feature.Geometry, feature.Properties, tile.offsetX, tile.offsetY, scale, layerStyle, float64(req.Zoom), fonts, sprite, grid)
+				if box, ok := drawSymbolFeature(dc, feature.Geometry, feature.Properties, tile.offsetX, tile.offsetY, scale, layerStyle, float64(req.Zoom), vp.fonts, vp.sprite, grid); ok && boxes != nil {
+					*boxes = append(*boxes, box)
+				}
 			}
 		}
 	}
+}
 
-	// Optional: Draw Marker
-	if req.MarkerLat != nil && req.MarkerLng != nil {
-		markerXY := wm.Forward(geom.XY{X: *req.MarkerLng, Y: *req.MarkerLat})
-		mx := markerXY.X*float64(TileSize) - minPxX
-		my := markerXY.Y*float64(TileSize) - minPxY
-
-		logger.Debug("drawing marker at screen px", "x", mx, "y", my)
-
-		dc.SetFillColor(color.RGBA{255, 0, 0, 255})
-		dc.DrawPath(mx, my, canvas.Circle(6))
-		dc.Fill()
-		dc.SetStrokeColor(color.RGBA{255, 255, 255, 255})
-		dc.SetStrokeWidth(2)
-		dc.DrawPath(mx, my, canvas.Circle(6))
-		dc.Stroke()
+// drawMarker draws the optional marker at its screen position. When a marker
+// is drawn it returns its bounding box (logical coordinates).
+func drawMarker(dc *canvas.Context, vp *viewParams) ([4]float64, bool) {
+	req := &vp.req
+	if req.MarkerLat == nil || req.MarkerLng == nil {
+		return [4]float64{}, false
 	}
+	markerXY := vp.wm.Forward(geom.XY{X: *req.MarkerLng, Y: *req.MarkerLat})
+	mx := markerXY.X*float64(TileSize) - vp.minPxX
+	my := markerXY.Y*float64(TileSize) - vp.minPxY
 
-	// Draw overlays on top of the map.
-	for _, o := range req.Overlays {
+	vp.logger.Debug("drawing marker at screen px", "x", mx, "y", my)
+
+	dc.SetFillColor(color.RGBA{255, 0, 0, 255})
+	dc.DrawPath(mx, my, canvas.Circle(6))
+	dc.Fill()
+	dc.SetStrokeColor(color.RGBA{255, 255, 255, 255})
+	dc.SetStrokeWidth(2)
+	dc.DrawPath(mx, my, canvas.Circle(6))
+	dc.Stroke()
+
+	return [4]float64{mx - 9, my - 9, mx + 9, my + 9}, true
+}
+
+func drawOverlays(dc *canvas.Context, vp *viewParams) {
+	for _, o := range vp.req.Overlays {
 		if o.Geometry.IsEmpty() {
 			continue
 		}
@@ -329,9 +501,43 @@ func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error
 		if strokeWidth <= 0 {
 			strokeWidth = 2
 		}
-		projected := projectGeometry(o.Geometry, wm, minPxX, minPxY)
+		projected := projectGeometry(o.Geometry, vp.wm, vp.minPxX, vp.minPxY)
 		drawOverlayGeometry(dc, projected, o.strokeColor(), o.fillColor(), strokeWidth)
 	}
+}
+
+// RenderCanvas renders the map to a vector canvas that can be rasterized or
+// exported to other formats (SVG, PDF, EPS, ...) via canvas.Write / WriteFile.
+func RenderCanvas(ctx context.Context, req RenderRequest) (*canvas.Canvas, error) {
+	vp, err := prepareView(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	c := canvas.New(vp.logW, vp.logH)
+	dc := canvas.NewContext(c)
+	dc.SetCoordSystem(canvas.CartesianIV)
+
+	drawBackground(dc, vp)
+
+	tiles, err := fetchTiles(ctx, vp)
+	if err != nil {
+		return nil, err
+	}
+
+	// Pass 1: fill and line layers.
+	drawGeometryLayers(dc, vp, tiles)
+
+	// Pass 2: symbol (text) layers, plus the marker. Incremental patch
+	// renders skip both; they are drawn once per pan over the composited
+	// frame instead.
+	if !req.skipSymbols {
+		drawSymbolLayers(dc, vp, tiles, nil)
+		drawMarker(dc, vp)
+	}
+
+	// Draw overlays on top of the map.
+	drawOverlays(dc, vp)
 
 	return c, nil
 }
@@ -432,9 +638,9 @@ func drawPoint(dc *canvas.Context, pt geom.Point, offsetX, offsetY, scale float6
 	dc.Fill()
 }
 
-func drawSymbolFeature(dc *canvas.Context, geometry geom.Geometry, props map[string]any, offsetX, offsetY, scale float64, style *StyleLayer, zoom float64, fonts *FontManager, sprite *Sprite, grid *collisionGrid) {
+func drawSymbolFeature(dc *canvas.Context, geometry geom.Geometry, props map[string]any, offsetX, offsetY, scale float64, style *StyleLayer, zoom float64, fonts *FontManager, sprite *Sprite, grid *collisionGrid) ([4]float64, bool) {
 	if geometry.IsEmpty() {
-		return
+		return [4]float64{}, false
 	}
 
 	iconName := resolveIconImage(style.Layout.IconImage, props, geometry, zoom)
@@ -445,12 +651,12 @@ func drawSymbolFeature(dc *canvas.Context, geometry geom.Geometry, props map[str
 		}
 	}
 	if iconName == "" && text == "" {
-		return
+		return [4]float64{}, false
 	}
 
 	anchor, angle, ok := symbolAnchor(geometry)
 	if !ok {
-		return
+		return [4]float64{}, false
 	}
 	x := offsetX + anchor.X*scale
 	y := offsetY + anchor.Y*scale
@@ -515,6 +721,13 @@ func drawSymbolFeature(dc *canvas.Context, geometry geom.Geometry, props map[str
 		}
 	}
 
+	// Nothing to actually draw (e.g. an icon name that is missing from the
+	// sprite and no text): report not-drawn so callers don't process a
+	// garbage bounding box.
+	if iconImg == nil && (text == "" || face == nil) {
+		return [4]float64{}, false
+	}
+
 	// Offset the text away from the icon so they don't overlap.
 	textAnchor := "center"
 	if s, ok := style.Layout.TextAnchor.(string); ok && s != "" {
@@ -570,7 +783,7 @@ func drawSymbolFeature(dc *canvas.Context, geometry geom.Geometry, props map[str
 	y1 := bcy + ch + pad
 
 	if grid != nil && grid.overlaps(x0, y0, x1, y1) {
-		return
+		return [4]float64{}, false
 	}
 
 	if angle != 0 {
@@ -591,6 +804,7 @@ func drawSymbolFeature(dc *canvas.Context, geometry geom.Geometry, props map[str
 	if grid != nil {
 		grid.add(x0, y0, x1, y1)
 	}
+	return [4]float64{x0, y0, x1, y1}, true
 }
 
 func layerVisible(l StyleLayer, zoom int) bool {
@@ -606,17 +820,30 @@ func layerVisible(l StyleLayer, zoom int) bool {
 // featureOnScreen reports whether a feature's bounding box (transformed to
 // screen coordinates) intersects the viewport, expanded by pad pixels to
 // account for stroke widths and label extents.
-func featureOnScreen(g geom.Geometry, offsetX, offsetY, scale, viewW, viewH, pad float64) bool {
-	env := g.Envelope()
-	minXY, maxXY, ok := env.MinMaxXYs()
-	if !ok {
+// envOnScreen reports whether the cached bounding box of a feature
+// (transformed to screen coordinates) intersects the viewport, expanded by pad
+// pixels to account for stroke widths and label extents. Features without a
+// usable box are treated as visible.
+func envOnScreen(e tileLayerEnvs, fi int, offsetX, offsetY, scale, viewW, viewH, pad float64) bool {
+	if fi >= len(e.ok) || !e.ok[fi] {
 		return true
 	}
-	x0 := offsetX + minXY.X*scale
-	x1 := offsetX + maxXY.X*scale
-	y0 := offsetY + minXY.Y*scale
-	y1 := offsetY + maxXY.Y*scale
+	r := e.rects[fi]
+	x0 := offsetX + r[0]*scale
+	x1 := offsetX + r[2]*scale
+	y0 := offsetY + r[1]*scale
+	y1 := offsetY + r[3]*scale
 	return x1 >= -pad && x0 <= viewW+pad && y1 >= -pad && y0 <= viewH+pad
+}
+
+// findLayerIdx returns the index of the named MVT layer, or -1.
+func findLayerIdx(collections []mvtgo.Layer, name string) int {
+	for i := range collections {
+		if collections[i].Name == name {
+			return i
+		}
+	}
+	return -1
 }
 
 func findLayer(collections []mvtgo.Layer, name string) *mvtgo.Layer {

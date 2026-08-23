@@ -725,6 +725,13 @@ func resolveGetKey(key any) string {
 	return ""
 }
 
+// Precompiled color regexes: parseColor runs per feature per layer, so these
+// must not be compiled on each call.
+var (
+	rgbRe = regexp.MustCompile(`rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\s*\)`)
+	hslRe = regexp.MustCompile(`hsla?\(\s*(\d+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%(?:\s*,\s*([\d.]+))?\s*\)`)
+)
+
 func parseColor(val any) color.Color {
 	cStr, ok := val.(string)
 	if !ok {
@@ -756,8 +763,7 @@ func parseColor(val any) color.Color {
 
 	// rgba(r, g, b, a) or rgb(r, g, b)
 	if strings.HasPrefix(cStr, "rgb") {
-		re := regexp.MustCompile(`rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\s*\)`)
-		matches := re.FindStringSubmatch(cStr)
+		matches := rgbRe.FindStringSubmatch(cStr)
 		if len(matches) >= 4 {
 			r, _ := strconv.ParseUint(matches[1], 10, 8)
 			g, _ := strconv.ParseUint(matches[2], 10, 8)
@@ -773,8 +779,7 @@ func parseColor(val any) color.Color {
 
 	// hsla(h, s%, l%, a) or hsl(h, s%, l%)
 	if strings.HasPrefix(cStr, "hsl") {
-		re := regexp.MustCompile(`hsla?\(\s*(\d+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%(?:\s*,\s*([\d.]+))?\s*\)`)
-		matches := re.FindStringSubmatch(cStr)
+		matches := hslRe.FindStringSubmatch(cStr)
 		if len(matches) >= 4 {
 			h, _ := strconv.ParseFloat(matches[1], 64)
 			s, _ := strconv.ParseFloat(matches[2], 64)

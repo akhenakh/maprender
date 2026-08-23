@@ -149,3 +149,26 @@ func BenchmarkRasterize(b *testing.B) {
 		_ = rasterizer.Draw(c, canvas.DPMM(1.0), canvas.LinearColorSpace{})
 	}
 }
+
+// BenchmarkRenderIncremental measures a panned frame that reuses the previous
+// frame's base pixels: geometry is composited incrementally while labels are
+// drawn in one full-viewport pass. Compare against BenchmarkRender.
+func BenchmarkRenderIncremental(b *testing.B) {
+	setupBench(b)
+	base := benchReq(17)
+	prev, err := RenderIncremental(context.Background(), base, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	panned := base
+	panned.CenterLng += 30.0 / TileSize * 360 // ~30 logical px east
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res, err := RenderIncremental(context.Background(), panned, prev)
+		if err != nil {
+			b.Fatal(err)
+		}
+		prev = res
+	}
+}

@@ -99,6 +99,28 @@ req := maprender.RenderRequest{
 Tiles are written to a temporary file and atomically moved into place, so
 multiple processes can safely share the same cache directory.
 
+### Incremental panning
+
+When panning, `RenderIncremental` shifts the label-free pixels of the previous frame and renders only the newly exposed strips instead of redrawing the whole viewport:
+
+```go
+prev, err := maprender.RenderIncremental(ctx, firstReq, nil) // nil prev = full redraw
+
+// on pan: pass back the previous frame
+next, err := maprender.RenderIncremental(ctx, newReq, prev)
+
+draw(next.Image)        // complete frame, ready to display
+// next.Base holds the same frame without labels; it is what the next call reuses
+```
+
+`RenderIncremental` returns a `PanFrame` with two images: `Image` (labels included — display this) and `Base` (geometry only — hand it back as `prev`). Keeping labels out of the reused pixels is what prevents text/icons from being re-stamped onto themselves and growing bolder with every pan. A nil or mismatching `prev` (zoom change, resize, ...) falls back to a full redraw through the same pipeline.
+
+**Trade-off:** geometry (background, fill and line layers) is composited incrementally from reused pixels plus freshly rendered strips, but text labels are re-rendered for the whole viewport on every pan. Label placement uses viewport-wide collision detection, so rendering labels per strip would produce seam artifacts — clipped, duplicated or overlapping labels that also pop in and out across successive pans. Re-running the symbol pass over the composited frame (blending only the drawn label boxes) keeps every frame identical to a full render.
+
+Run the demo with `go run ./cmd/example -pan`.
+
+Measured on a dense city view at zoom 17 (512x512), panning runs ~38x faster than a full render (`BenchmarkRenderIncremental`); gains shrink on lighter views where absolute costs are sub-millisecond anyway.
+
 ### Overlays
 
 Draw arbitrary geometries (WGS84 lon/lat) on top of the map from GeoJSON, WKT, WKB, or a `geom.Geometry` directly. The stroke defaults to red and the fill to transparent; both can be set explicitly or derived from GeoJSON feature properties (keys `stroke`/`stroke-color`/`strokeColor` and `fill`/`fill-color`/`fillColor`):
