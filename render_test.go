@@ -164,3 +164,27 @@ func TestIconTextOffset(t *testing.T) {
 		}
 	}
 }
+
+func TestSymbolAngle(t *testing.T) {
+	cases := []struct {
+		name    string
+		angle   float64
+		hasIcon bool
+		want    float64
+	}{
+		// A line pointing southwest (e.g. southbound Broadway): text is
+		// flipped upright, an icon (one-way arrow) keeps the true direction.
+		{"text sw flipped", -135, false, 45},
+		{"icon sw keeps direction", -135, true, -135},
+		{"text ne unchanged", 45, false, 45},
+		{"icon ne unchanged", 45, true, 45},
+		{"icon south keeps direction", 135, true, 135},
+		{"text south flipped", 135, false, -45},
+	}
+	for _, c := range cases {
+		if got := symbolAngle(c.angle, c.hasIcon); got != c.want {
+			t.Errorf("%s: symbolAngle(%v, icon=%v) = %v, want %v",
+				c.name, c.angle, c.hasIcon, got, c.want)
+		}
+	}
+}

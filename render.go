@@ -658,20 +658,14 @@ func drawSymbolFeature(dc *canvas.Context, geometry geom.Geometry, props map[str
 	if !ok {
 		return [4]float64{}, false
 	}
+	// Keep text labels readable: when the line direction points "down"
+	// (which would render the text upside-down), flip the label by 180
+	// degrees. Icons must keep the line's true direction — flipping them
+	// reverses their meaning (e.g. one-way arrows would point against
+	// traffic).
+	angle = symbolAngle(angle, iconName != "")
 	x := offsetX + anchor.X*scale
 	y := offsetY + anchor.Y*scale
-
-	// Keep labels readable: when the street direction points "down" (which
-	// would render the text upside-down), flip the label by 180 degrees.
-	if angle > 90 || angle < -90 {
-		angle += 180
-	}
-	for angle > 180 {
-		angle -= 360
-	}
-	for angle < -180 {
-		angle += 360
-	}
 
 	// Resolve the icon (centered on the anchor) if the layer has one.
 	var iconImg image.Image
@@ -898,6 +892,24 @@ func (g *collisionGrid) add(x0, y0, x1, y1 float64) {
 // to place a symbol's label, together with the tangent angle (in degrees) of
 // the underlying line. For non-line geometries the angle is 0 (horizontal
 // text).
+// symbolAngle normalizes the line tangent angle for symbol placement.
+// Text-only symbols are flipped by 180 degrees when they would render
+// upside-down (text-keep-upright). Symbols carrying an icon keep the line's
+// true direction: rotating an icon by 180 degrees would reverse its meaning
+// (e.g. one-way arrows pointing against traffic).
+func symbolAngle(angle float64, hasIcon bool) float64 {
+	if !hasIcon && (angle > 90 || angle < -90) {
+		angle += 180
+	}
+	for angle > 180 {
+		angle -= 360
+	}
+	for angle < -180 {
+		angle += 360
+	}
+	return angle
+}
+
 func symbolAnchor(geometry geom.Geometry) (geom.XY, float64, bool) {
 	if geometry.IsEmpty() {
 		return geom.XY{}, 0, false
